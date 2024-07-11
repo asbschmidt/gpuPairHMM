@@ -299,6 +299,8 @@ void PairHMM_align_partition_half(
             if (temp1.w <= 4) lambda_array[temp1.w][2*i+1+group_nr*(group_size*numRegs/2)].y = one_half - temp_h2.y;
         }
 
+        __syncwarp(myGroupMask);
+
     };
 
     auto load_probabilities = [&]() {
