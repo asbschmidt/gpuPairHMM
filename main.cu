@@ -75,6 +75,52 @@ struct PartitionLimits{
 constexpr int numPartitions = PartitionLimits::numPartitions();
 
 
+
+
+
+#include <thrust/device_malloc_allocator.h>
+
+#include <iostream>
+
+template<class T>
+struct ThrustCudaMallocAsyncAllocator : thrust::device_malloc_allocator<T> {
+    using value_type = T;
+    using super_t = thrust::device_malloc_allocator<T>;
+
+    using pointer = typename super_t::pointer;
+    using size_type = typename super_t::size_type;
+    using reference = typename super_t::reference;
+    using const_reference = typename super_t::const_reference;
+
+    cudaStream_t stream{};
+
+    ThrustCudaMallocAsyncAllocator(cudaStream_t stream_)
+        : stream(stream_){
+        
+    }
+
+    pointer allocate(size_type n){
+        T* ptr = nullptr;
+        cudaError_t status = cudaMallocAsync(&ptr, n * sizeof(T), stream);
+        if(status != cudaSuccess){
+            cudaGetLastError(); //reset error state
+            std::cerr << "ThrustCudaMallocAsyncAllocator cuda error when allocating " << (n * sizeof(T)) << " bytes: " << cudaGetErrorString(status) << "\n";
+            throw std::bad_alloc();
+        }
+        return thrust::device_pointer_cast(ptr);
+    }
+
+    void deallocate(pointer ptr, size_type /*n*/){
+        cudaError_t status = cudaFreeAsync(ptr.get(), stream);
+        if(status != cudaSuccess){
+            cudaGetLastError(); //reset error state
+            throw std::bad_alloc();
+        }
+    }
+};
+
+
+
 __global__
 void partitionIndicesKernel(
     int* numIndicesPerPartitionPerBatch,
@@ -126,6 +172,23 @@ void gatherNumWarpsPerPartitionFromInclPrefixSumKernel(
 ){
     for(int tid = threadIdx.x + blockIdx.x * blockDim.x; tid < numPartitions; tid += gridDim.x * blockDim.x){
         numWarpsPerPartition[tid] = numWarpsPerBatchInclusivePrefixSumPerPartition[tid * numBatches + (numBatches - 1)];
+    }
+}
+
+
+__global__
+void computeAlignmentsPerPartitionPerBatch(
+    int* d_numAlignmentsPerPartitionPerBatch,
+    const int* d_numIndicesPerPartitionPerBatch,
+    const int* d_numHaplotypesPerBatch,
+    int numPartitions, 
+    int numBatches
+){
+    for(int partition = blockIdx.y; partition < numPartitions; partition += gridDim.y){
+        for(int batch = threadIdx.x + blockIdx.x * blockDim.x; batch < numBatches; batch += gridDim.x * blockDim.x){
+            d_numAlignmentsPerPartitionPerBatch[partition * numBatches + batch]
+                = d_numIndicesPerPartitionPerBatch[partition * numBatches + batch] * d_numHaplotypesPerBatch[batch];
+        }
     }
 }
 
@@ -188,6 +251,375 @@ void processKernel(
         }
     }
 }
+
+
+
+template <int group_size, int numRegs> 
+__global__
+void PairHMM_align_partition_half_allowMultipleBatchesPerWarp(
+    const uint8_t * read_chars,
+    const uint8_t * hap_chars,
+    const uint8_t * base_quals,
+    const uint8_t * ins_quals,
+    const uint8_t * del_quals,
+    float * devAlignmentScores,
+    const int* read_offsets,
+    const int* hap_offsets,
+    const int* read_length,
+    const int* hap_length,
+    const int *reads_in_batch,
+    const int *haps_in_batch,
+    const int *offset_hap_batches,
+
+    const int* numIndicesPerBatch,
+    const int* indicesPerBatch,
+    const int* numReadsPerBatchPrefixSum,
+    const int numBatches,
+    const int* resultOffsetsPerBatch,
+
+    const int* numAlignmentsPerBatch,
+    const int* numAlignmentsPerBatchInclusivePrefixSum,
+    const int numAlignments
+) {
+
+    alignas(8) __shared__ __half2 lambda_array[5][16*numRegs];
+
+    float M[numRegs], I, D[numRegs];
+    half2 alpha[numRegs/2], delta[numRegs/2], sigma[numRegs/2];
+    float Results[numRegs];
+
+    const int threadIdInGroup = threadIdx.x % group_size;
+    const int groupIdInBlock = threadIdx.x / group_size;
+    const int groupIdInGrid = (threadIdx.x + blockIdx.x * blockDim.x) / group_size;
+    const unsigned int myGroupMask = __match_any_sync(0xFFFFFFFF, groupIdInGrid); //compute mask for all threads with same groupIdInGrid
+
+    if(groupIdInGrid < numAlignments){
+
+        const int batchIdByGroupId = thrust::distance(
+            numAlignmentsPerBatchInclusivePrefixSum,
+            thrust::upper_bound(thrust::seq,
+                numAlignmentsPerBatchInclusivePrefixSum,
+                numAlignmentsPerBatchInclusivePrefixSum + numBatches,
+                groupIdInGrid
+            )
+        );
+        const int batchId = min(batchIdByGroupId, numBatches-1);
+        const int groupIdInBatch = groupIdInGrid - (batchId == 0 ? 0 : numAlignmentsPerBatchInclusivePrefixSum[batchId-1]);
+        const int hapToProcessInBatch = groupIdInBatch % haps_in_batch[batchId];
+        const int readIndexToProcessInBatch = groupIdInBatch / haps_in_batch[batchId];
+
+        const int offset_read_batches = numReadsPerBatchPrefixSum[batchId];
+        const int readToProcessInBatch = indicesPerBatch[offset_read_batches + readIndexToProcessInBatch];
+
+        const int read_nr = readToProcessInBatch;
+        const int global_read_id = read_nr + offset_read_batches;
+
+
+        const int byteOffsetForRead = read_offsets[global_read_id];
+        const int readLength = read_length[global_read_id];
+
+        const int b_h_off = offset_hap_batches[batchId];
+        const int bytesOffsetForHap = hap_offsets[hapToProcessInBatch+b_h_off];
+        const char4* const HapsAsChar4 = reinterpret_cast<const char4*>(&hap_chars[bytesOffsetForHap]);
+        const int haploLength = hap_length[hapToProcessInBatch+b_h_off];
+
+        // if(groupIdInGrid < 10 && group_size == 8 && numRegs == 8){
+        //     if(threadIdInGroup == 0){
+        //         printf("group %d, myGroupMask %u, batchId %d, groupIdInBatch %d, hapToProcessInBatch %d, readIndexToProcessInBatch %d, readToProcessInBatch %d, readLength %d, haploLength %d, numAlignments %d\n",
+        //             groupIdInGrid, myGroupMask, batchId, groupIdInBatch, hapToProcessInBatch, readIndexToProcessInBatch, readToProcessInBatch, readLength, haploLength, numAlignments);
+        //     }
+        // }
+
+        const float eps = 0.1;
+        const float beta = 0.9;
+        float M_l, D_l, M_ul, D_ul, I_ul;
+        float penalty_temp0, penalty_temp1, penalty_temp2, penalty_temp3;
+        float init_D;
+
+        const float constant = ::cuda::std::numeric_limits<float>::max() / 16;
+
+        auto load_PSSM = [&]() {
+
+            char4 temp0, temp1;
+            const half one_half = 1.0;
+            const half three = 3.0;
+            const char4* QualsAsChar4 = reinterpret_cast<const char4*>(&base_quals[byteOffsetForRead]);
+            const char4* ReadsAsChar4 = reinterpret_cast<const char4*>(&read_chars[byteOffsetForRead]);
+            for (int i=threadIdInGroup; i<(readLength+3)/4; i+=group_size) {
+                half2 temp_h2, temp_h3;
+                temp0 = QualsAsChar4[i];
+                temp1 = ReadsAsChar4[i];
+                temp_h2.x = cPH2PR[uint8_t(temp0.x)];
+                temp_h2.y = cPH2PR[uint8_t(temp0.y)];
+                temp_h3.x = temp_h2.x/three;
+                temp_h3.y = temp_h2.y/three;
+                for (int j=0; j<5; j++) lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
+                if (temp1.x <= 4) lambda_array[temp1.x][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x;
+                if (temp1.y <= 4) lambda_array[temp1.y][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y;
+                temp_h2.x = cPH2PR[uint8_t(temp0.z)];
+                temp_h2.y = cPH2PR[uint8_t(temp0.w)];
+                temp_h3.x = temp_h2.x/three;
+                temp_h3.y = temp_h2.y/three;
+                for (int j=0; j<5; j++) lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
+                if (temp1.z <= 4) lambda_array[temp1.z][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x;
+                if (temp1.w <= 4) lambda_array[temp1.w][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y;
+            }
+
+            __syncwarp(myGroupMask);
+
+        };
+
+        auto load_probabilities = [&]() {
+            char4 temp0, temp1;
+            const char4* InsQualsAsChar4 = reinterpret_cast<const char4*>(&ins_quals[byteOffsetForRead]);
+            const char4* DelQualsAsChar4 = reinterpret_cast<const char4*>(&del_quals[byteOffsetForRead]);
+            for (int i=0; i<numRegs/4; i++) {
+                if (threadIdInGroup*numRegs/4+i < (readLength+3)/4) {
+
+                    temp0 = InsQualsAsChar4[threadIdInGroup*numRegs/4+i];
+                    temp1 = DelQualsAsChar4[threadIdInGroup*numRegs/4+i];
+
+                    //delta[4*i] = cPH2PR[uint8_t(temp0.x)];
+                    //delta[4*i+1] = cPH2PR[uint8_t(temp0.y)];
+                    //delta[4*i+2] = cPH2PR[uint8_t(temp0.z)];
+                    //delta[4*i+3] = cPH2PR[uint8_t(temp0.w)];
+                    delta[2*i] = __floats2half2_rn(cPH2PR[uint8_t(temp0.x)],cPH2PR[uint8_t(temp0.y)]);
+                    delta[2*i+1] = __floats2half2_rn(cPH2PR[uint8_t(temp0.z)],cPH2PR[uint8_t(temp0.w)]);
+
+                    //sigma[4*i] = cPH2PR[uint8_t(temp1.x)];
+                    //sigma[4*i+1] = cPH2PR[uint8_t(temp1.y)];
+                    //sigma[4*i+2] = cPH2PR[uint8_t(temp1.z)];
+                    //sigma[4*i+3] = cPH2PR[uint8_t(temp1.w)];
+                    sigma[2*i] = __floats2half2_rn(cPH2PR[uint8_t(temp1.x)],cPH2PR[uint8_t(temp1.y)]);
+                    sigma[2*i+1] = __floats2half2_rn(cPH2PR[uint8_t(temp1.z)],cPH2PR[uint8_t(temp1.w)]);
+
+                    //alpha[4*i] = 1.0 - (delta[4*i] + sigma[4*i]);
+                    //alpha[4*i+1] = 1.0 - (delta[4*i+1] + sigma[4*i+1]);
+                    //alpha[4*i+2] = 1.0 - (delta[4*i+2] + sigma[4*i+2]);
+                    //alpha[4*i+3] = 1.0 - (delta[4*i+3] + sigma[4*i+3]);
+                    alpha[2*i] = __float2half2_rn(1.0) - __hadd2(delta[2*i], sigma[2*i]);
+                    alpha[2*i+1] = __float2half2_rn(1.0) - __hadd2(delta[2*i+1], sigma[2*i+1]);
+                }
+            }
+
+        };
+
+        auto compute_probabilities = [&]() {
+            char4 temp0, temp1;
+            const char4* InsQualsAsChar4 = reinterpret_cast<const char4*>(&ins_quals[byteOffsetForRead]);
+            const char4* DelQualsAsChar4 = reinterpret_cast<const char4*>(&del_quals[byteOffsetForRead]);
+
+            auto computePH2PR = [](int i) -> float{
+                // return pow(10.0,  (-i) / 10.0);
+                // return __powf(10.0f,  (-i) / 10.0f);
+                // return exp10((-i) / 10.0);
+                return __exp10f((-i) / 10.0f);
+            };
+
+            for (int i=0; i<numRegs/4; i++) {
+                if (threadIdInGroup*numRegs/4+i < (readLength+3)/4) {
+
+                    // temp0 = InsQualsAsChar4[threadIdInGroup*numRegs/4+i];
+                    // temp1 = DelQualsAsChar4[threadIdInGroup*numRegs/4+i];
+                    temp0 = InsQualsAsChar4[0];
+                    temp1 = DelQualsAsChar4[0];
+
+                    delta[2*i] = __floats2half2_rn(computePH2PR(temp0.x),computePH2PR(temp0.y));
+                    delta[2*i+1] = __floats2half2_rn(computePH2PR(temp0.z),computePH2PR(temp0.w));
+
+                    sigma[2*i] = __floats2half2_rn(computePH2PR(temp1.x),computePH2PR(temp1.y));
+                    sigma[2*i+1] = __floats2half2_rn(computePH2PR(temp1.z),computePH2PR(temp1.w));
+
+                    alpha[2*i] = __float2half2_rn(1.0) - __hadd2(delta[2*i], sigma[2*i]);
+                    alpha[2*i+1] = __float2half2_rn(1.0) - __hadd2(delta[2*i+1], sigma[2*i+1]);
+                }
+            }
+
+        };
+
+        auto init_penalties = [&]() {
+            #pragma unroll
+            for (int i=0; i<numRegs; i++) M[i] = D[i] = Results[i] = 0.0;
+            M_l = M_ul = D_ul = I_ul = D_l = I = 0.0;
+            if (!threadIdInGroup) D_l = D_ul = init_D;
+        };
+
+
+        char hap_letter;
+
+        __half2 score2;
+        __half2 *sbt_row;
+
+        auto calc_DP_float = [&](){
+
+            sbt_row = lambda_array[hap_letter];
+            float2 foo = *((float2*)&sbt_row[threadIdx.x*numRegs/2]);
+            memcpy(&score2, &foo.x, sizeof(__half2));
+            penalty_temp0 = M[0];
+            penalty_temp1 = D[0];
+            M[0] = float(score2.x) * fmaf(alpha[0].x,M_ul,beta*(I_ul+D_ul));
+            D[0] = fmaf(sigma[0].x,penalty_temp0,eps*D[0]);
+            I = fmaf(delta[0].x,M_ul,eps*I_ul);
+            Results[0] += M[0] + I;
+            penalty_temp2 = M[1];
+            penalty_temp3 = D[1];
+            M[1] = float(score2.y) * fmaf(alpha[0].y,penalty_temp0,beta*(I+penalty_temp1));
+            D[1] = fmaf(sigma[0].y,penalty_temp2,eps*D[1]);
+            I = fmaf(delta[0].y,penalty_temp0,eps*I);
+            Results[1] += M[1] + I;
+
+            memcpy(&score2, &foo.y, sizeof(__half2));
+            penalty_temp0 = M[2];
+            penalty_temp1 = D[2];
+            M[2] = float(score2.x) * fmaf(alpha[1].x,penalty_temp2,beta*(I+penalty_temp3));
+            D[2] = fmaf(sigma[1].x,penalty_temp0,eps*D[2]);
+            I = fmaf(delta[1].x,penalty_temp2,eps*I);
+            Results[2] += M[2] + I;
+            penalty_temp2 = M[3];
+            penalty_temp3 = D[3];
+            M[3] = float(score2.y) * fmaf(alpha[1].y,penalty_temp0,beta*(I+penalty_temp1));
+            D[3] = fmaf(sigma[1].y,penalty_temp2,eps*D[3]);
+            I = fmaf(delta[1].y,penalty_temp0,eps*I);
+            Results[3] += M[3] + I;
+
+            #pragma unroll
+            for (int i=1; i<numRegs/4; i++) {
+                float2 foo = *((float2*)&sbt_row[threadIdx.x*numRegs/2+2*i]);
+                memcpy(&score2, &foo.x, sizeof(__half2));
+                penalty_temp0 = M[4*i];
+                penalty_temp1 = D[4*i];
+                M[4*i] = float(score2.x) * fmaf(alpha[2*i].x,penalty_temp2,beta*(I+penalty_temp3));
+                D[4*i] = fmaf(sigma[2*i].x,penalty_temp0,eps*D[4*i]);
+                I = fmaf(delta[2*i].x,penalty_temp2,eps*I);
+                Results[4*i] += M[4*i] + I;
+                penalty_temp2 = M[4*i+1];
+                penalty_temp3 = D[4*i+1];
+                M[4*i+1] = float(score2.y) * fmaf(alpha[2*i].y,penalty_temp0,beta*(I+penalty_temp1));
+                D[4*i+1] = fmaf(sigma[2*i].y,penalty_temp2,eps*D[4*i+1]);
+                I = fmaf(delta[2*i].y,penalty_temp0,eps*I);
+                Results[4*i+1] += M[4*i+1] + I;
+
+                memcpy(&score2, &foo.y, sizeof(__half2));
+                penalty_temp0 = M[4*i+2];
+                penalty_temp1 = D[4*i+2];
+                M[4*i+2] = float(score2.x) * fmaf(alpha[2*i+1].x,penalty_temp2,beta*(I+penalty_temp3));
+                D[4*i+2] = fmaf(sigma[2*i+1].x,penalty_temp0,eps*D[4*i+2]);
+                I = fmaf(delta[2*i+1].x,penalty_temp2,eps*I);
+                Results[4*i+2] += M[4*i+2] + I;
+
+                penalty_temp2 = M[4*i+3];
+                penalty_temp3 = D[4*i+3];
+                M[4*i+3] = float(score2.y) * fmaf(alpha[2*i+1].y,penalty_temp0,beta*(I+penalty_temp1));
+                D[4*i+3] = fmaf(sigma[2*i+1].y,penalty_temp2,eps*D[4*i+3]);
+                I = fmaf(delta[2*i+1].y,penalty_temp0,eps*I);
+                Results[4*i+3] += M[4*i+3] + I;
+            }
+        };
+
+        auto shuffle_penalty = [&]() {
+            M_ul = M_l;
+            D_ul = D_l;
+
+            M_l = __shfl_up_sync(myGroupMask, M[numRegs-1], 1, group_size);
+            I_ul = __shfl_up_sync(myGroupMask, I, 1, group_size);
+            D_l = __shfl_up_sync(myGroupMask, D[numRegs-1], 1, group_size);
+
+            if (!threadIdInGroup) {
+                M_l = I_ul = 0.0;
+                D_l = init_D;
+            }
+        };
+
+        int result_thread = (readLength-1)/numRegs;
+        int result_reg = (readLength-1)%numRegs;
+
+        load_PSSM();
+        load_probabilities();
+        // compute_probabilities();
+
+        init_D = constant/haploLength;
+        init_penalties();
+
+        char4 new_hap_letter4;
+        hap_letter = 4;
+        int k;
+        for (k=0; k<haploLength-3; k+=4) {
+            new_hap_letter4 = HapsAsChar4[k/4];
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.x;
+            calc_DP_float();
+            shuffle_penalty();
+
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.y;
+            calc_DP_float();
+            shuffle_penalty();
+
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.z;
+            calc_DP_float();
+            shuffle_penalty();
+
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.w;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        if (haploLength%4 >= 1) {
+            new_hap_letter4 = HapsAsChar4[k/4];
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.x;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        if (haploLength%4 >= 2) {
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.y;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        if (haploLength%4 >= 3) {
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.w;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        for (k=0; k<result_thread; k++) {
+            // hap_letter = __shfl_up_sync(__activemask(), hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            calc_DP_float();
+            shuffle_penalty(); // shuffle_penalty_active();
+        }
+        // adjust I values
+        I = fmaf(delta[0].x,M_ul,eps*I_ul);
+        Results[0] += I;
+        I = fmaf(delta[0].y,M[0],eps*I);
+        Results[1] += I;
+        for (int p=1; p<numRegs/2; p++) {
+            I = fmaf(delta[p].x,M[2*p-1],eps*I);
+            Results[2*p] += I;
+            I = fmaf(delta[p].y,M[2*p],eps*I);
+            Results[2*p+1] += I;
+        }
+        // adjust I values
+        //I = fmaf(delta[0],M_ul,eps*I_ul);
+        //Results[0] += I;
+        //for (int p=1; p<numRegs; p++) {
+        //    I = fmaf(delta[p],M[p-1],eps*I);
+        //    Results[p] += I;
+        //}
+
+
+        if (threadIdInGroup == result_thread) {
+            float temp_res = Results[result_reg];
+            temp_res =  log10f(temp_res) - log10f(constant);
+            devAlignmentScores[read_nr*haps_in_batch[batchId]+hapToProcessInBatch+resultOffsetsPerBatch[batchId]] = temp_res;
+        }
+    }
+
+
+}
+
 
 
 
@@ -455,7 +887,8 @@ void PairHMM_align_partition_half(
     //int h_off = offset_haps[b_h_off];
 
     for (int i=0; i<haps_in_batch[batchId]; i++) {
-        init_D = constant/hap_length[i];
+        init_D = constant/hap_length[i]; // why is this i instead of i+b_h_off ?
+        // init_D = constant/hap_length[i+b_h_off];
         init_penalties();
         const char4* HapsAsChar4 = reinterpret_cast<const char4*>(&hap_chars[hap_offsets[i+b_h_off]]);
         //const char4* HapsAsChar4 = reinterpret_cast<const char4*>(&hap_chars[hap_offsets[i]-hap_offsets[0]]);
@@ -1715,6 +2148,8 @@ int main(const int argc, char const * const argv[])
 
     counter = 0;
     for (int i=0; i<num_batches; i++) counter += read_batches[i] * hap_batches[i];
+    const int totalNumberOfAlignments = counter;
+
     float* alignment_scores_float = nullptr;
     alignment_scores_float = (float *) malloc(sizeof(float)*counter);
     std::cout << "Calculating:  " << counter << " alignments in " << num_batches << " batches \n";
@@ -1917,14 +2352,14 @@ int main(const int argc, char const * const argv[])
     thrust::host_vector<int> h_numWarpsPerBatchPerPartition = d_numWarpsPerBatchPerPartition;
     thrust::host_vector<int> h_numWarpsPerBatchInclusivePrefixSumPerPartition = d_numWarpsPerBatchInclusivePrefixSumPerPartition;
     thrust::host_vector<int> h_numWarpsPerPartition = d_numWarpsPerPartition;
-
+#if 0
     std::cout << "warps per partition: ";
     for(int p = 0; p < numPartitions; p++){
         std::cout << h_numWarpsPerPartition[p] << " ";
     }
     std::cout << "\n";
 
-    #if 1
+
 
     for(int p = 0; p < numPartitions; p++){
         if(p <= 4){
@@ -2034,6 +2469,8 @@ int main(const int argc, char const * const argv[])
     std::cout << "numPartitions: " << numPartitions << "\n";
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
+
+#if 1    
     cudaMemset(devAlignmentScoresFloat,0,sizeof(float)*counter);
     TIMERSTART_CUDA(PAIR_HMM_PARTITIONED)
     if (h_numWarpsPerPartition[0]) PairHMM_align_partition_half<8,8><<<h_numWarpsPerPartition[0],32,0,streams_part[0]>>>(dev_read_chars, dev_hap_chars, dev_base_qual, dev_ins_qual, dev_del_qual, devAlignmentScoresFloat, dev_offset_reads, dev_offset_haps, dev_read_len, dev_hap_len, dev_read_batches, dev_hap_batches, dev_offset_hap_batches,
@@ -2073,6 +2510,130 @@ int main(const int argc, char const * const argv[])
 //        d_numWarpsPerBatchPerPartition.data().get() + 8*num_batches, d_numWarpsPerBatchInclusivePrefixSumPerPartition.data().get() + 8*num_batches,
 //        dev_offset_read_batches,  num_batches, d_resultOffsetsPerBatch.data().get());
     TIMERSTOP_CUDA(PAIR_HMM_PARTITIONED)
+    cudaMemcpy(alignment_scores_float, devAlignmentScoresFloat, counter*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
+    res_off = 0;
+    for (int i=0; i<1; i++) { // for (int i=0; i<num_batches; i++) {
+        cout << "Batch:" << i << " Offset: " << res_off << " results: ";
+        for(int j = 0; j < 8; j++) // for(int j = 0; j < read_batches[i]; j++)
+            for(int k = 0; k < hap_batches[i]; k++)
+                cout << " " << alignment_scores_float[res_off+j*hap_batches[i]+k];
+        cout << " \n";
+        res_off += read_batches[i] * hap_batches[i];
+    }
+#endif
+
+    thrust::device_vector<int> d_numAlignmentsPerBatch(num_batches * numPartitions);
+    thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
+    thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
+
+    {
+        int* d_numAlignmentsPerPartitionPerBatch = d_numAlignmentsPerBatchInclPrefixSum.data().get(); // reuse
+        const int* d_numHaplotypesPerBatch = dev_hap_batches;
+        computeAlignmentsPerPartitionPerBatch<<<dim3(SDIV(num_batches, 128), numPartitions), 128,0, (cudaStream_t)0>>>(
+            d_numAlignmentsPerPartitionPerBatch,
+            d_numIndicesPerPartitionPerBatch.data().get(),
+            d_numHaplotypesPerBatch,
+            numPartitions, 
+            num_batches
+        ); CUERR;
+
+        auto offsets = thrust::make_transform_iterator(
+            thrust::make_counting_iterator(0),
+            [num_batches] __host__ __device__(int partition){
+                return partition * num_batches;
+            }
+        );
+        size_t temp_storage_bytes = 0;
+        cub::DeviceSegmentedReduce::Sum(nullptr, temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
+            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, (cudaStream_t)0); CUERR;
+        thrust::device_vector<char> d_temp(temp_storage_bytes);
+        cub::DeviceSegmentedReduce::Sum(d_temp.data().get(), temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
+            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, (cudaStream_t)0); CUERR;
+    }
+    thrust::host_vector<int> h_numAlignmentsPerPartition = d_numAlignmentsPerPartition;
+
+    std::cout << "h_numAlignmentsPerPartition: ";
+    for(int i = 0; i< numPartitions; i++){
+        std::cout << h_numAlignmentsPerPartition[i] << ", ";
+    }
+    std::cout << "\n";
+
+    cudaMemset(devAlignmentScoresFloat, 0, totalNumberOfAlignments * sizeof(float)); CUERR;
+    TIMERSTART_CUDA(PAIR_HMM_PARTITIONED_COMBINED)
+    #define COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(stream) \
+        constexpr int groupsPerBlock = blocksize / group_size; \
+        const int numAlignmentsInPartition = h_numAlignmentsPerPartition[partitionId]; \
+        const int* d_numIndicesPerBatch = d_numIndicesPerPartitionPerBatch.data().get() + partitionId*num_batches; \
+        thrust::transform( \
+            thrust::cuda::par_nosync.on(stream), \
+            d_numIndicesPerBatch, \
+            d_numIndicesPerBatch + num_batches, \
+            dev_hap_batches, \
+            d_numAlignmentsPerBatch.begin() + partitionId * num_batches, \
+            thrust::multiplies<int>{} \
+        ); \
+        thrust::inclusive_scan( \
+            thrust::cuda::par_nosync(ThrustCudaMallocAsyncAllocator<int>(stream)).on(stream), \
+            d_numAlignmentsPerBatch.begin() + partitionId * num_batches, \
+            d_numAlignmentsPerBatch.begin() + partitionId * num_batches+ num_batches, \
+            d_numAlignmentsPerBatchInclPrefixSum.begin() + partitionId * num_batches \
+        );  \
+        PairHMM_align_partition_half_allowMultipleBatchesPerWarp<group_size,numRegs><<<SDIV(numAlignmentsInPartition, groupsPerBlock), blocksize,0,stream>>>(dev_read_chars, dev_hap_chars, dev_base_qual, dev_ins_qual, dev_del_qual, devAlignmentScoresFloat, dev_offset_reads, dev_offset_haps, dev_read_len, dev_hap_len, dev_read_batches, dev_hap_batches, dev_offset_hap_batches,  \
+            d_numIndicesPerBatch, d_indicesPerPartitionPerBatch.data().get() + partitionId*num_reads,  \
+            dev_offset_read_batches,  num_batches, d_resultOffsetsPerBatch.data().get(), d_numAlignmentsPerBatch.data().get() + partitionId * num_batches, d_numAlignmentsPerBatchInclPrefixSum.data().get() + partitionId * num_batches, numAlignmentsInPartition); \
+
+
+    if (h_numAlignmentsPerPartition[0]){
+        constexpr int partitionId = 0;
+        constexpr int group_size = 8;
+        constexpr int numRegs = 8;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]);
+    }
+    if (h_numAlignmentsPerPartition[1]){
+        constexpr int partitionId = 1;
+        constexpr int group_size = 8;
+        constexpr int numRegs = 12;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]);
+    }
+    if (h_numAlignmentsPerPartition[2]){
+        constexpr int partitionId = 2;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 8;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]);
+    }
+    if (h_numAlignmentsPerPartition[3]){
+        constexpr int partitionId = 3;
+        constexpr int group_size = 8;
+        constexpr int numRegs = 20;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]);
+    }
+    if (h_numAlignmentsPerPartition[4]){
+        constexpr int partitionId = 4;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 16;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]);
+    }
+    if (h_numAlignmentsPerPartition[5]){
+        constexpr int partitionId = 5;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 20;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]);
+    }
+    if (h_numAlignmentsPerPartition[6]){
+        constexpr int partitionId = 6;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 24;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]);
+    }
+
+    TIMERSTOP_CUDA(PAIR_HMM_PARTITIONED_COMBINED)
     cudaMemcpy(alignment_scores_float, devAlignmentScoresFloat, counter*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
     res_off = 0;
     for (int i=0; i<1; i++) { // for (int i=0; i<num_batches; i++) {
