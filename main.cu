@@ -227,6 +227,8 @@ void PairHMM_align_partition_half(
     const int group_nr = thid/group_size;
     const int numGroupsPerWarp = 32/group_size;
 
+    const unsigned int myGroupMask = __match_any_sync(0xFFFFFFFF, group_nr); //compute mask for all threads with same group_nr
+
     const int batchId = thrust::distance(
         numWarpsPerBatchInclusivePrefixSum,
         thrust::upper_bound(thrust::seq,
@@ -417,9 +419,9 @@ void PairHMM_align_partition_half(
         M_ul = M_l;
         D_ul = D_l;
 
-        M_l = __shfl_up_sync(0xFFFFFFFF, M[numRegs-1], 1, 32);
-        I_ul = __shfl_up_sync(0xFFFFFFFF, I, 1, 32);
-        D_l = __shfl_up_sync(0xFFFFFFFF, D[numRegs-1], 1, 32);
+        M_l = __shfl_up_sync(myGroupMask, M[numRegs-1], 1, group_size);
+        I_ul = __shfl_up_sync(myGroupMask, I, 1, group_size);
+        D_l = __shfl_up_sync(myGroupMask, D[numRegs-1], 1, group_size);
 
         if (!group_id) {
             M_l = I_ul = 0.0;
@@ -427,20 +429,20 @@ void PairHMM_align_partition_half(
         }
     };
 
-    auto shuffle_penalty_active = [&]() {
-        M_ul = M_l;
-        D_ul = D_l;
+    // auto shuffle_penalty_active = [&]() {
+    //     M_ul = M_l;
+    //     D_ul = D_l;
 
-        unsigned mask = __activemask();
-        M_l = __shfl_up_sync(mask, M[numRegs-1], 1, 32);
-        I_ul = __shfl_up_sync(mask, I, 1, 32);
-        D_l = __shfl_up_sync(mask, D[numRegs-1], 1, 32);
+    //     unsigned mask = __activemask();
+    //     M_l = __shfl_up_sync(mask, M[numRegs-1], 1, 32);
+    //     I_ul = __shfl_up_sync(mask, I, 1, 32);
+    //     D_l = __shfl_up_sync(mask, D[numRegs-1], 1, 32);
 
-        if (!group_id) {
-            M_l = I_ul = 0.0;
-            D_l = init_D;
-        }
-    };
+    //     if (!group_id) {
+    //         M_l = I_ul = 0.0;
+    //         D_l = init_D;
+    //     }
+    // };
 
 
     load_PSSM();
@@ -460,22 +462,22 @@ void PairHMM_align_partition_half(
         int k;
         for (k=0; k<hap_length[i+b_h_off]-3; k+=4) {
             new_hap_letter4 = HapsAsChar4[k/4];
-            hap_letter = __shfl_up_sync(0xFFFFFFFF, hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!group_id) hap_letter = new_hap_letter4.x;
             calc_DP_float();
             shuffle_penalty();
 
-            hap_letter = __shfl_up_sync(0xFFFFFFFF, hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!group_id) hap_letter = new_hap_letter4.y;
             calc_DP_float();
             shuffle_penalty();
 
-            hap_letter = __shfl_up_sync(0xFFFFFFFF, hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!group_id) hap_letter = new_hap_letter4.z;
             calc_DP_float();
             shuffle_penalty();
 
-            hap_letter = __shfl_up_sync(0xFFFFFFFF, hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!group_id) hap_letter = new_hap_letter4.w;
             calc_DP_float();
             shuffle_penalty();
@@ -485,30 +487,31 @@ void PairHMM_align_partition_half(
 
         if (hap_length[i+b_h_off]%4 >= 1) {
             new_hap_letter4 = HapsAsChar4[k/4];
-            hap_letter = __shfl_up_sync(0xFFFFFFFF, hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!group_id) hap_letter = new_hap_letter4.x;
             calc_DP_float();
             shuffle_penalty();
 
         }
         if (hap_length[i+b_h_off]%4 >= 2) {
-            hap_letter = __shfl_up_sync(0xFFFFFFFF, hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!group_id) hap_letter = new_hap_letter4.y;
             calc_DP_float();
             shuffle_penalty();
         }
 
         if (hap_length[i+b_h_off]%4 >= 3) {
-            hap_letter = __shfl_up_sync(0xFFFFFFFF, hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!group_id) hap_letter = new_hap_letter4.w;
             calc_DP_float();
             shuffle_penalty();
         }
 
         for (k=0; k<result_thread; k++) {
-            hap_letter = __shfl_up_sync(__activemask(), hap_letter, 1, 32);
+            // hap_letter = __shfl_up_sync(__activemask(), hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             calc_DP_float();
-            shuffle_penalty_active();
+            shuffle_penalty(); // shuffle_penalty_active();
         }
         // adjust I values
         I = fmaf(delta[0].x,M_ul,eps*I_ul);
