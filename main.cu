@@ -887,8 +887,8 @@ void PairHMM_align_partition_half(
     //int h_off = offset_haps[b_h_off];
 
     for (int i=0; i<haps_in_batch[batchId]; i++) {
-        init_D = constant/hap_length[i]; // why is this i instead of i+b_h_off ?
-        // init_D = constant/hap_length[i+b_h_off];
+        // init_D = constant/hap_length[i]; // why is this i instead of i+b_h_off ?
+        init_D = constant/hap_length[i+b_h_off];
         init_penalties();
         const char4* HapsAsChar4 = reinterpret_cast<const char4*>(&hap_chars[hap_offsets[i+b_h_off]]);
         //const char4* HapsAsChar4 = reinterpret_cast<const char4*>(&hap_chars[hap_offsets[i]-hap_offsets[0]]);
