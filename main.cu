@@ -2300,66 +2300,23 @@ int main(const int argc, char const * const argv[])
         thrust::multiplies<int>{}
     );
     thrust::exclusive_scan(
-        thrust::cuda::par_nosync.on((cudaStream_t)0),
+        thrust::cuda::par_nosync(ThrustCudaMallocAsyncAllocator<int>((cudaStream_t)0)).on((cudaStream_t)0),
         d_resultOffsetsPerBatch.begin(),
         d_resultOffsetsPerBatch.begin() + num_batches,
         d_resultOffsetsPerBatch.begin()
     );
 
-    for(int i = 0; i < std::min(10, num_batches); i++){
-        std::cout << "batch " << i << ", num reads: " << read_batches[i]
-            << ", num haps " << hap_batches[i] << ", product: " <<
-            read_batches[i] * hap_batches[i]
-            << ", offset : " << d_resultOffsetsPerBatch[i] << "\n";
-    }
+    // for(int i = 0; i < std::min(10, num_batches); i++){
+    //     std::cout << "batch " << i << ", num reads: " << read_batches[i]
+    //         << ", num haps " << hap_batches[i] << ", product: " <<
+    //         read_batches[i] * hap_batches[i]
+    //         << ", offset : " << d_resultOffsetsPerBatch[i] << "\n";
+    // }
 
 
-    thrust::device_vector<int> d_numWarpsPerBatchPerPartition(num_batches * numPartitions, 0);
-    thrust::device_vector<int> d_numWarpsPerBatchInclusivePrefixSumPerPartition(num_batches * numPartitions, 0);
-    thrust::device_vector<int> d_numWarpsPerPartition(numPartitions);
-
-    const int groups_per_warp[numPartitions] = {4,4,2,4,2,2,2,2,2,2};
-    for(int p = 0; p < numPartitions; p++){
-        cudaStream_t stream = 0;
-
-        const int alignmentsPerWarp = groups_per_warp[p];
-
-        computeNumWarpsPerBatchKernel<<<SDIV(num_batches, 128), 128, 0, stream>>>(
-            d_numWarpsPerBatchPerPartition.data().get() + p * num_batches,
-            d_numIndicesPerPartitionPerBatch.data().get() + p * num_batches,
-            num_batches,
-            alignmentsPerWarp
-        );
-
-        thrust::inclusive_scan(
-            thrust::cuda::par_nosync.on(stream),
-            d_numWarpsPerBatchPerPartition.begin() + p * num_batches,
-            d_numWarpsPerBatchPerPartition.begin() + (p+1) * num_batches,
-            d_numWarpsPerBatchInclusivePrefixSumPerPartition.begin() + p * num_batches
-        );
-    }
-    gatherNumWarpsPerPartitionFromInclPrefixSumKernel<<<SDIV(numPartitions, 128), 128>>>(
-        d_numWarpsPerPartition.data().get(),
-        d_numWarpsPerBatchInclusivePrefixSumPerPartition.data().get(),
-        num_batches,
-        numPartitions
-    ); CUERR;
-
-
-
+#if 0
     thrust::host_vector<int> h_numIndicesPerPartitionPerBatch = d_numIndicesPerPartitionPerBatch;
     thrust::host_vector<int> h_indicesPerPartitionPerBatch = d_indicesPerPartitionPerBatch;
-    thrust::host_vector<int> h_numWarpsPerBatchPerPartition = d_numWarpsPerBatchPerPartition;
-    thrust::host_vector<int> h_numWarpsPerBatchInclusivePrefixSumPerPartition = d_numWarpsPerBatchInclusivePrefixSumPerPartition;
-    thrust::host_vector<int> h_numWarpsPerPartition = d_numWarpsPerPartition;
-#if 0
-    std::cout << "warps per partition: ";
-    for(int p = 0; p < numPartitions; p++){
-        std::cout << h_numWarpsPerPartition[p] << " ";
-    }
-    std::cout << "\n";
-
-
 
     for(int p = 0; p < numPartitions; p++){
         if(p <= 4){
@@ -2382,48 +2339,10 @@ int main(const int argc, char const * const argv[])
                 std::cout << " | ";
             }
             std::cout << "\n";
-
-            std::cout << "numWarpsPerBatch: ";
-            for(int b = 0; b < 100; b++){ // for(int b = 0; b < num_batches; b++){
-                std::cout << h_numWarpsPerBatchPerPartition[p * num_batches + b] << ", ";
-            }
-            std::cout << "\n";
-            std::cout << "numWarpsPerBatchInclPrefixSum: ";
-            for(int b = 0; b < 100; b++){ // for(int b = 0; b < num_batches; b++){
-                std::cout << h_numWarpsPerBatchInclusivePrefixSumPerPartition[p * num_batches + b] << ", ";
-            }
-            std::cout << "\n";
         }
     }
     #endif
 
-/*    for(int p = 0; p < numPartitions; p++){
-        if(p == 1){
-            cudaStream_t stream = 0;
-
-            const int blocksize = 32;
-            const int numWarpsRequired = h_numWarpsPerPartition[p];
-            if(numWarpsRequired > 0){
-                const int numBlocksRequired = SDIV(numWarpsRequired, (blocksize / 32));
-
-                std::cout << "Kernel for partition p = " << p << ". numWarpsRequired = " << numWarpsRequired << "\n";
-
-                processKernel<<<numBlocksRequired, blocksize, 0, stream>>>(
-                    d_numIndicesPerPartitionPerBatch.data().get() + p * num_batches,
-                    d_indicesPerPartitionPerBatch.data().get() + p * num_reads,
-                    d_numWarpsPerBatchPerPartition.data().get() + p * num_batches,
-                    d_numWarpsPerBatchInclusivePrefixSumPerPartition.data().get() + p * num_batches,
-                    dev_offset_read_batches,
-                    num_batches,
-                    groups_per_warp[p],
-                    32/groups_per_warp[p]
-                ); CUERR;
-                cudaDeviceSynchronize(); CUERR;
-            }
-        }
-    }
-
-*/
     int res_off = 0;
 
 /*
@@ -2470,7 +2389,7 @@ int main(const int argc, char const * const argv[])
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
 
-#if 1    
+#if 0    
     cudaMemset(devAlignmentScoresFloat,0,sizeof(float)*counter);
     TIMERSTART_CUDA(PAIR_HMM_PARTITIONED)
     if (h_numWarpsPerPartition[0]) PairHMM_align_partition_half<8,8><<<h_numWarpsPerPartition[0],32,0,streams_part[0]>>>(dev_read_chars, dev_hap_chars, dev_base_qual, dev_ins_qual, dev_del_qual, devAlignmentScoresFloat, dev_offset_reads, dev_offset_haps, dev_read_len, dev_hap_len, dev_read_batches, dev_hap_batches, dev_offset_hap_batches,
@@ -2527,9 +2446,11 @@ int main(const int argc, char const * const argv[])
     thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
 
     {
+        cudaStream_t stream = cudaStreamLegacy;
+
         int* d_numAlignmentsPerPartitionPerBatch = d_numAlignmentsPerBatchInclPrefixSum.data().get(); // reuse
         const int* d_numHaplotypesPerBatch = dev_hap_batches;
-        computeAlignmentsPerPartitionPerBatch<<<dim3(SDIV(num_batches, 128), numPartitions), 128,0, (cudaStream_t)0>>>(
+        computeAlignmentsPerPartitionPerBatch<<<dim3(SDIV(num_batches, 128), numPartitions), 128,0, stream>>>(
             d_numAlignmentsPerPartitionPerBatch,
             d_numIndicesPerPartitionPerBatch.data().get(),
             d_numHaplotypesPerBatch,
@@ -2545,10 +2466,10 @@ int main(const int argc, char const * const argv[])
         );
         size_t temp_storage_bytes = 0;
         cub::DeviceSegmentedReduce::Sum(nullptr, temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
-            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, (cudaStream_t)0); CUERR;
-        thrust::device_vector<char> d_temp(temp_storage_bytes);
+            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, stream); CUERR;
+        thrust::device_vector<char, ThrustCudaMallocAsyncAllocator<char>> d_temp(temp_storage_bytes, ThrustCudaMallocAsyncAllocator<char>(stream));
         cub::DeviceSegmentedReduce::Sum(d_temp.data().get(), temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
-            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, (cudaStream_t)0); CUERR;
+            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, stream); CUERR;
     }
     thrust::host_vector<int> h_numAlignmentsPerPartition = d_numAlignmentsPerPartition;
 
