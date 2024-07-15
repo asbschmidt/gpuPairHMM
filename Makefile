@@ -4,7 +4,10 @@ OPTIMIZATION = -O3 -g
 WARNINGS     = -Xcompiler="-Wall -Wextra"
 # NVCC_FLAGS   = -arch=sm_89 -lineinfo --expt-relaxed-constexpr -rdc=true
 # NVCC_FLAGS   = -arch=native -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -Xcompiler="-fopenmp"
-NVCC_FLAGS   = -arch=sm_89 -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -res-usage -Xcompiler="-fopenmp"
+NVCC_FLAGS   = -arch=sm_89 -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -Xcompiler="-fopenmp" #-res-usage 
+
+
+INCLUDE_FLAGS = -INVTX/c/include
 LDFLAGS      = -Xcompiler="-pthread "  $(NVCC_FLAGS)
 COMPILER     = nvcc
 ARTIFACT     = align
@@ -21,7 +24,7 @@ clean :
 
 
 # compiler call
-COMPILE = $(COMPILER) $(NVCC_FLAGS) $(DIALECT) $(OPTIMIZATION) $(WARNINGS) -c $< -o $@
+COMPILE = $(COMPILER) $(INCLUDE_FLAGS) $(NVCC_FLAGS) $(DIALECT) $(OPTIMIZATION) $(WARNINGS) -c $< -o $@
 
 
 # link object files into executable
