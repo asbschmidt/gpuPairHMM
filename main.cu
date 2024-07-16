@@ -96,6 +96,7 @@ struct Options{
     std::string outputfile = "";
     int transferchunksize = 50000;
     bool checkResults = false;
+    int checkResultsDecimalDigits = 3;
 };
 
 template <class T>
@@ -2450,6 +2451,12 @@ float transform_quality(std::vector<float>& ph2pr, int8_t char_quality){
     return ph2pr[char_quality];
 }
 
+struct AlignHostStorage{
+    std::vector<float> M;
+    std::vector<float> I;
+    std::vector<float> D;
+};
+
 double align_host(
     const uint8_t* hap_bases,
     const int hap_length,
@@ -2466,9 +2473,9 @@ double align_host(
 
     const double constant = std::numeric_limits<float>::max() / 16;
 
-    float *M = new float[2*(hap_length+1)];
-    float *I = new float[2*(hap_length+1)];
-    float *D = new float[2*(hap_length+1)];
+    std::vector<float> M(2*(hap_length+1));
+    std::vector<float> I(2*(hap_length+1));
+    std::vector<float> D(2*(hap_length+1));
     int target_row = 0;
     int source_row = 0;
 
@@ -2549,7 +2556,6 @@ void convert_DNA(
 
 //std::vector<float> align_all_host (batch& batch_){
 void align_all_host (batch& batch_,std::vector<float>& ph2pr){
-    //std::vector<float> results;
 
     int counter = 0;
     for (int i=0; i<1; i++) {    //for (int i=0; i<batch_.batch_haps.size(); i++) { // for (int i=0; i<batch_.batch_haps.size(); i++) { //for (int i=0; i<1; i++) {
@@ -2572,19 +2578,33 @@ void align_all_host (batch& batch_,std::vector<float>& ph2pr){
 }
 
 std::vector<float> processBatchCPU(const batch& batch_, const std::vector<float>& ph2pr){
+    size_t dp_cells = 0; //for timing macro
+    TIMERSTART_CUDA(processBatchCPU);
+
     const int numBatches = batch_.batch_haps.size();
 
+    std::vector<int> numberOfAlignmentsPerBatch(numBatches);
     int totalNumberOfAlignments = 0;
+    #pragma omp parallel for reduction(+:totalNumberOfAlignments)
     for (int i=0; i < numBatches; i++){
         const int numReadsInBatch = batch_.batch_reads[i];
         const int numHapsInBatch = batch_.batch_haps[i];
-        totalNumberOfAlignments += numReadsInBatch * numHapsInBatch;
+        const int numAlignments = numReadsInBatch * numHapsInBatch;
+        numberOfAlignmentsPerBatch[i] = numAlignments;
+        totalNumberOfAlignments += numAlignments;
+    }
+    std::vector<int> numberOfAlignmentsPerBatchExclPrefixSum(numBatches);
+    numberOfAlignmentsPerBatchExclPrefixSum[0] = 0;
+    for (int i=1; i < numBatches; i++){
+        numberOfAlignmentsPerBatchExclPrefixSum[i] 
+            = numberOfAlignmentsPerBatchExclPrefixSum[i-1] + numberOfAlignmentsPerBatch[i-1];
     }
 
-    std::vector<float> results;
-    results.reserve(totalNumberOfAlignments);
-
+    std::vector<float> results(totalNumberOfAlignments);
+    
+    #pragma omp parallel for schedule(dynamic)
     for (int i=0; i<numBatches; i++) {
+
         const int numReadsInBatch = batch_.batch_reads[i];
         const int numHapsInBatch = batch_.batch_haps[i];
         for (int k=0; k < numReadsInBatch; k++){
@@ -2596,16 +2616,86 @@ std::vector<float> processBatchCPU(const batch& batch_, const std::vector<float>
                 int h_off = batch_.hap_offsets[hap];
                 int r_off = batch_.read_offsets[read];
                 double score = align_host(&batch_.haps[h_off],hap_len,&batch_.reads[r_off],read_len,&batch_.base_quals[r_off],&batch_.ins_quals[r_off],&batch_.del_quals[r_off],batch_.gcp_quals[r_off],&ph2pr[0]);
-                results.push_back(score);
+                
+                const int outputIndex = numberOfAlignmentsPerBatchExclPrefixSum[i] + k * numHapsInBatch + j;
+                // const int outputIndex = numberOfAlignmentsPerBatchExclPrefixSum[i] + j * numReadsInBatch + k;
+                results[outputIndex] = score;
             }
         }
     }
+
+
+    TIMERSTOP_CUDA(processBatchCPU);
+
+    return results;
+}
+
+
+std::vector<float> processBatchCPUFaster(const batch& batch_, const std::vector<float>& ph2pr){
+    size_t dp_cells = 0; //for timing macro
+    TIMERSTART_CUDA(processBatchCPUFaster);
+
+    const int numBatches = batch_.batch_haps.size();
+
+    std::vector<int> numberOfAlignmentsPerBatch(numBatches);
+    int totalNumberOfAlignments = 0;
+    #pragma omp parallel for reduction(+:totalNumberOfAlignments)
+    for (int i=0; i < numBatches; i++){
+        const int numReadsInBatch = batch_.batch_reads[i];
+        const int numHapsInBatch = batch_.batch_haps[i];
+        const int numAlignments = numReadsInBatch * numHapsInBatch;
+        numberOfAlignmentsPerBatch[i] = numAlignments;
+        totalNumberOfAlignments += numAlignments;
+    }
+    std::vector<int> numAlignmentsPerBatchInclusivePrefixSum(numBatches);
+    numAlignmentsPerBatchInclusivePrefixSum[0] = numberOfAlignmentsPerBatch[0];
+    for (int i=1; i < numBatches; i++){
+        numAlignmentsPerBatchInclusivePrefixSum[i] 
+            = numAlignmentsPerBatchInclusivePrefixSum[i-1] + numberOfAlignmentsPerBatch[i];
+    }
+
+    std::vector<float> results(totalNumberOfAlignments);
+
+    #pragma omp parallel for schedule(dynamic, 16)
+    for(int alignmentId = 0; alignmentId < totalNumberOfAlignments; alignmentId++){
+        const int batchIdByGroupId = std::distance(
+            numAlignmentsPerBatchInclusivePrefixSum.begin(),
+            std::upper_bound(
+                numAlignmentsPerBatchInclusivePrefixSum.begin(),
+                numAlignmentsPerBatchInclusivePrefixSum.begin() + numBatches,
+                alignmentId
+            )
+        );
+        const int batchId = min(batchIdByGroupId, numBatches-1);
+        const int numHapsInBatch = batch_.batch_haps[batchId];
+        const int alignmentOffset = (batchId == 0 ? 0 : numAlignmentsPerBatchInclusivePrefixSum[batchId-1]);
+        const int alignmentIdInBatch = alignmentId - alignmentOffset;
+        const int hapToProcessInBatch = alignmentIdInBatch % numHapsInBatch;
+        const int readToProcessInBatch = alignmentIdInBatch / numHapsInBatch;
+
+        int read = batch_.batch_reads_offsets[batchId]+readToProcessInBatch;
+        int read_len = batch_.readlen[read];
+        int hap = batch_.batch_haps_offsets[batchId]+hapToProcessInBatch;
+        int hap_len = batch_.haplen[hap];
+        int h_off = batch_.hap_offsets[hap];
+        int r_off = batch_.read_offsets[read];
+        double score = align_host(&batch_.haps[h_off],hap_len,&batch_.reads[r_off],read_len,&batch_.base_quals[r_off],&batch_.ins_quals[r_off],&batch_.del_quals[r_off],batch_.gcp_quals[r_off],&ph2pr[0]);
+        
+        const int outputIndex = alignmentOffset + readToProcessInBatch * numHapsInBatch + hapToProcessInBatch;
+        // const int outputIndex = alignmentOffset + hapToProcessInBatch * numReadsInBatch + readToProcessInBatch;
+        results[outputIndex] = score;
+    }
+
+
+    TIMERSTOP_CUDA(processBatchCPUFaster);
 
     return results;
 }
 
 
 std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*options*/){
+    TIMERSTART_CUDA(processBatchAsWhole);
+
     const uint8_t* read_chars       = fullBatch.reads.data(); //batch_2.chars.data();
     const uint read_bytes = fullBatch.reads.size();
     const uint8_t* hap_chars       = fullBatch.haps.data(); //batch_2.chars.data();
@@ -2927,6 +3017,8 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
 
     for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
 
+    TIMERSTOP_CUDA(processBatchAsWhole);
+
     return alignment_scores_float;
 }
 
@@ -2936,6 +3028,8 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
 
 
 std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const Options& options){
+    TIMERSTART_CUDA(processBatch_overlapped);
+
     // pinned_batch fullBatch(fullBatch_default);
     const auto& fullBatch = fullBatch_default;
 
@@ -3419,6 +3513,8 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
         cudaStreamDestroy(stream);
     }
 
+    TIMERSTOP_CUDA(processBatch_overlapped);
+
     return alignment_scores_float;
 }
 
@@ -3480,6 +3576,10 @@ int main(const int argc, char const * const argv[])
         if(argstring == "--checkResults"){
             options.checkResults = true;
         }
+        if(argstring == "--checkResultsDecimalDigits"){
+            options.checkResultsDecimalDigits = std::atoi(argv[x+1]);
+            x++;
+        }
     }
 
     
@@ -3487,6 +3587,7 @@ int main(const int argc, char const * const argv[])
     std::cout << "options.outputfile = " << options.outputfile << "\n";
     std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
     std::cout << "options.checkResults = " << options.checkResults << "\n";
+    std::cout << "options.checkResultsDecimalDigits = " << options.checkResultsDecimalDigits << "\n";
 
     int counter = 0;
     int lasthap = 0;
@@ -3558,7 +3659,6 @@ int main(const int argc, char const * const argv[])
     cudaDeviceGetDefaultMemPool(&memPool, deviceId);
     cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold, &releaseThreshold); CUERR;
 
-    // std::vector<float> resultsCPU = processBatchCPU(fullBatch, ph2pr);
 
 
     std::vector<float> resultsBatchAsWhole = processBatchAsWhole(fullBatch, options);
@@ -3575,9 +3675,32 @@ int main(const int argc, char const * const argv[])
         }
     }
 
-    // for(int i = 0; i < int(resultsBatchAsWhole.size()); i++){
-    //     std::cout << "i " << i << " : " << resultsCPU[i] << " " << resultsBatchAsWhole[i] << " " <<  resultsBatchOverlapped[i] << "\n";
-    // }
+    if(options.checkResults){
+        // std::vector<float> resultsCPU2 = processBatchCPU(fullBatch, ph2pr);
+        std::vector<float> resultsCPU = processBatchCPUFaster(fullBatch, ph2pr);
+        // assert(resultsCPU == resultsCPU2);
+
+        double limit = 1.0;
+        for(int i = 0; i < options.checkResultsDecimalDigits; i++){
+            limit /= 10.0;
+        }
+
+        int numErrors = 0;
+        for(int i = 0; i < int(resultsBatchOverlapped.size()); i++){
+            if(std::abs(resultsCPU[i] - resultsBatchOverlapped[i]) > limit){
+                if(numErrors < 5){
+                    std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped[i] << "\n";
+                    std::cout << std::abs(resultsCPU[i] - resultsBatchOverlapped[i]) << "\n";
+                }
+                numErrors++;
+            }
+        }
+        std::cout << "Comparison with cpu results finished. diff limit " << limit << ". errors: " << numErrors << "\n";
+
+        // for(int i = 0; i < int(resultsBatchAsWhole.size()); i++){
+        //     std::cout << "i " << i << " : " << resultsCPU[i] << " " << resultsBatchAsWhole[i] << " " <<  resultsBatchOverlapped[i] << "\n";
+        // }
+    }
 
     // int res_off = 0;
     // for (int i=0; i<1; i++) { // for (int i=0; i<num_batches; i++) {

@@ -4,7 +4,7 @@ OPTIMIZATION = -O3 -g
 WARNINGS     = -Xcompiler="-Wall -Wextra"
 # NVCC_FLAGS   = -arch=sm_89 -lineinfo --expt-relaxed-constexpr -rdc=true
 # NVCC_FLAGS   = -arch=native -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -Xcompiler="-fopenmp"
-NVCC_FLAGS   = -arch=sm_89 -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -Xcompiler="-fopenmp" #-res-usage 
+NVCC_FLAGS   = -arch=native -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -Xcompiler="-fopenmp" #-res-usage 
 
 
 INCLUDE_FLAGS = -INVTX/c/include
