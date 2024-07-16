@@ -22,6 +22,7 @@
 #include <cub/cub.cuh>
 
 #include "cuda_helpers.cuh"
+#include "timers.cuh"
 #include "Context.h"
 
 #include <omp.h>
@@ -2309,7 +2310,7 @@ batch read_batch(std::ifstream& file_, std::vector<float> /*ph2pr*/, int nread, 
     int buffersize;
     int offset = -33;
 
-    std::size_t split;
+
 
     if(print){
         std::cout << "line: " << linebuffer_  << "\n";
@@ -2348,8 +2349,8 @@ batch read_batch(std::ifstream& file_, std::vector<float> /*ph2pr*/, int nread, 
             std::cout << "readl: " << batch_.read_offsets[i] << "\n";
         }
 
-        uint8_t t = 0;
-        float score = 0;
+        // uint8_t t = 0;
+        // float score = 0;
         for (int j=0; j<readl+4-buffersize; j++){
 
             batch_.reads.push_back(read[j]);
@@ -2451,11 +2452,6 @@ float transform_quality(std::vector<float>& ph2pr, int8_t char_quality){
     return ph2pr[char_quality];
 }
 
-struct AlignHostStorage{
-    std::vector<float> M;
-    std::vector<float> I;
-    std::vector<float> D;
-};
 
 double align_host(
     const uint8_t* hap_bases,
@@ -3532,20 +3528,7 @@ int main(const int argc, char const * const argv[])
     std::ifstream file_;
     std::string linebuffer_;
 
-    int nread;
-    int nhapl;
-
-    uint64_t dp_cells = 0;
-
     const int MAX_PH2PR_INDEX = 128;
-
-    std::size_t split;
-
-    batch fullBatch;
-
-
-    fullBatch.read_offsets.push_back(0);
-    fullBatch.hap_offsets.push_back(0);
 
     std::vector<float> ph2pr =  generate_ph2pr(MAX_PH2PR_INDEX);
 
@@ -3589,28 +3572,32 @@ int main(const int argc, char const * const argv[])
     std::cout << "options.checkResults = " << options.checkResults << "\n";
     std::cout << "options.checkResultsDecimalDigits = " << options.checkResultsDecimalDigits << "\n";
 
-    int counter = 0;
-    int lasthap = 0;
-    int lastread = 0;
 
-    while (!file_.eof()){
+    helpers::CpuTimer timerParseInputFile("parse input file");
+    batch fullBatch;
+    {
+        fullBatch.read_offsets.push_back(0);
+        fullBatch.hap_offsets.push_back(0);
+        int lastread = 0;
+        int lasthap = 0;
+        while (!file_.eof()){
 
-        getline(file_, linebuffer_);
-        if (file_.good()){
-            split = linebuffer_.find(" ");
-            nread = stoi(linebuffer_.substr(0,split));
-            nhapl = stoi(linebuffer_.substr(split));
+            getline(file_, linebuffer_);
+            if (file_.good()){
+                const size_t split = linebuffer_.find(" ");
+                const int nread = stoi(linebuffer_.substr(0,split));
+                const int nhapl = stoi(linebuffer_.substr(split));
 
-            batch test = read_batch(file_, ph2pr, nread, nhapl, false, lastread, lasthap);
-            lasthap = test.lasthapoffset;
-            lastread = test.lastreadoffset;
-            concat_batch(fullBatch, test);
-
-            counter++;
-            // std::cout << "batch number: " << counter << "\n";
+                batch test = read_batch(file_, ph2pr, nread, nhapl, false, lastread, lasthap);
+                lasthap = test.lasthapoffset;
+                lastread = test.lastreadoffset;
+                concat_batch(fullBatch, test);
+            }
         }
+        generate_batch_offsets(fullBatch);
     }
-    generate_batch_offsets(fullBatch);
+    timerParseInputFile.stop();
+    timerParseInputFile.print();
 
     #if 0
     {
