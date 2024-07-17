@@ -1,5 +1,5 @@
 # settings
-DIALECT      = -std=c++14
+DIALECT      = -std=c++17
 OPTIMIZATION = -O3 -g
 WARNINGS     = -Xcompiler="-Wall -Wextra"
 # NVCC_FLAGS   = -arch=sm_89 -lineinfo --expt-relaxed-constexpr -rdc=true
