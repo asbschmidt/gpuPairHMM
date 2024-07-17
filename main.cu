@@ -422,16 +422,65 @@ void PairHMM_align_partition_half_allowMultipleBatchesPerWarp(
                 temp_h2.y = cPH2PR[uint8_t(temp0.y)];
                 temp_h3.x = temp_h2.x/three;
                 temp_h3.y = temp_h2.y/three;
-                for (int j=0; j<5; j++) lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
-                if (temp1.x <= 4) lambda_array[temp1.x][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x;
-                if (temp1.y <= 4) lambda_array[temp1.y][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y;
+
+                //init hap == A,C,G,T as mismatch
+                for (int j=0; j<4; j++){
+                    lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)] = temp_h3; // mismatch
+                }
+                //hap == N always matches
+                lambda_array[4][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x; // match
+                lambda_array[4][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y; // match
+
+                if (temp1.x < 4){
+                    // set hap == read
+                    lambda_array[temp1.x][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x; // match
+                }else if (temp1.x == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x; // N always match
+                    }
+                }
+                if (temp1.y < 4){
+                    // set hap == read
+                    lambda_array[temp1.y][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y; // match
+                }else if (temp1.y == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y; // N always match
+                    }
+                }
+
                 temp_h2.x = cPH2PR[uint8_t(temp0.z)];
                 temp_h2.y = cPH2PR[uint8_t(temp0.w)];
                 temp_h3.x = temp_h2.x/three;
                 temp_h3.y = temp_h2.y/three;
-                for (int j=0; j<5; j++) lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
-                if (temp1.z <= 4) lambda_array[temp1.z][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x;
-                if (temp1.w <= 4) lambda_array[temp1.w][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y;
+
+                //init hap == A,C,G,T as mismatch
+                for (int j=0; j<4; j++){
+                    lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)] = temp_h3; // mismatch
+                }
+                //hap == N always matches
+                lambda_array[4][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x; // match
+                lambda_array[4][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y; // match
+
+                if (temp1.z < 4){
+                    // set hap == read
+                    lambda_array[temp1.z][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x; // match
+                }else if (temp1.z == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one_half - temp_h2.x; // N always match
+                    }
+                }
+                if (temp1.w < 4){
+                    // set hap == read
+                    lambda_array[temp1.w][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y; // match
+                }else if (temp1.w == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one_half - temp_h2.y; // N always match
+                    }
+                }
             }
 
             __syncwarp(myGroupMask);
@@ -808,16 +857,65 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp(
                 temp_h2.y = cPH2PR[uint8_t(temp0.y)];
                 temp_h3.x = temp_h2.x/three;
                 temp_h3.y = temp_h2.y/three;
-                for (int j=0; j<5; j++) lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
-                if (temp1.x <= 4) lambda_array[temp1.x][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x;
-                if (temp1.y <= 4) lambda_array[temp1.y][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y;
+
+                //init hap == A,C,G,T as mismatch
+                for (int j=0; j<4; j++){
+                    lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)] = temp_h3; // mismatch
+                }
+                //hap == N always matches
+                lambda_array[4][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x; // match
+                lambda_array[4][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y; // match
+
+                if (temp1.x < 4){
+                    // set hap == read
+                    lambda_array[temp1.x][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x; // match
+                }else if (temp1.x == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x; // N always match
+                    }
+                }
+                if (temp1.y < 4){
+                    // set hap == read
+                    lambda_array[temp1.y][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y; // match
+                }else if (temp1.y == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y; // N always match
+                    }
+                }
+
                 temp_h2.x = cPH2PR[uint8_t(temp0.z)];
                 temp_h2.y = cPH2PR[uint8_t(temp0.w)];
                 temp_h3.x = temp_h2.x/three;
                 temp_h3.y = temp_h2.y/three;
-                for (int j=0; j<5; j++) lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
-                if (temp1.z <= 4) lambda_array[temp1.z][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x;
-                if (temp1.w <= 4) lambda_array[temp1.w][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y;
+
+                //init hap == A,C,G,T as mismatch
+                for (int j=0; j<4; j++){
+                    lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)] = temp_h3; // mismatch
+                }
+                //hap == N always matches
+                lambda_array[4][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x; // match
+                lambda_array[4][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y; // match
+
+                if (temp1.z < 4){
+                    // set hap == read
+                    lambda_array[temp1.z][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x; // match
+                }else if (temp1.z == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x; // N always match
+                    }
+                }
+                if (temp1.w < 4){
+                    // set hap == read
+                    lambda_array[temp1.w][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y; // match
+                }else if (temp1.w == 4){
+                    // read == N always matches
+                    for (int j=0; j<4; j++){
+                        lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y; // N always match
+                    }
+                }
             }
 
             __syncwarp(myGroupMask);
@@ -870,7 +968,7 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp(
         char hap_letter;
 
         
-        auto calc_DP_float = [&](){
+        auto calc_DP_float = [&](int row){
             
             // __half2 score2;
             float2* sbt_row = lambda_array[hap_letter];
@@ -903,6 +1001,11 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp(
             I = fmaf(delta[3],penalty_temp0,eps*I);
             Results[3] += M[3] + I;
 
+            // if(threadIdInGroup * numRegs + 0 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 0, foo.x);
+            // if(threadIdInGroup * numRegs + 1 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 1, foo.y);
+            // if(threadIdInGroup * numRegs + 2 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 2, foo.z);
+            // if(threadIdInGroup * numRegs + 3 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 3, foo.w);
+
             #pragma unroll
             for (int i=1; i<numRegs/4; i++) {
                 float4 foo = *((float4*)&sbt_row[threadIdx.x*numRegs/2+2*i]);
@@ -934,6 +1037,11 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp(
                 D[4*i+3] = fmaf(sigma[4*i+3],penalty_temp2,eps*D[4*i+3]);
                 I = fmaf(delta[4*i+3],penalty_temp0,eps*I);
                 Results[4*i+3] += M[4*i+3] + I;
+
+            //     if(threadIdInGroup * numRegs + 4*i + 0 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 4*i + 0, foo.x);
+            //     if(threadIdInGroup * numRegs + 4*i + 1 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 4*i + 1, foo.y);
+            //     if(threadIdInGroup * numRegs + 4*i + 2 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 4*i + 2, foo.z);
+            //     if(threadIdInGroup * numRegs + 4*i + 3 < haploLength) printf("row %d, col %d, lambda %f\n", row, threadIdInGroup * numRegs + 4*i + 3, foo.w);
             }
         };
 
@@ -968,47 +1076,47 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp(
             new_hap_letter4 = HapsAsChar4[k/4];
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!threadIdInGroup) hap_letter = new_hap_letter4.x;
-            calc_DP_float();
+            calc_DP_float(k);
             shuffle_penalty();
 
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!threadIdInGroup) hap_letter = new_hap_letter4.y;
-            calc_DP_float();
+            calc_DP_float(k);
             shuffle_penalty();
 
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!threadIdInGroup) hap_letter = new_hap_letter4.z;
-            calc_DP_float();
+            calc_DP_float(k);
             shuffle_penalty();
 
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!threadIdInGroup) hap_letter = new_hap_letter4.w;
-            calc_DP_float();
+            calc_DP_float(k);
             shuffle_penalty();
         }
         if (haploLength%4 >= 1) {
             new_hap_letter4 = HapsAsChar4[k/4];
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!threadIdInGroup) hap_letter = new_hap_letter4.x;
-            calc_DP_float();
+            calc_DP_float(k);
             shuffle_penalty();
         }
         if (haploLength%4 >= 2) {
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!threadIdInGroup) hap_letter = new_hap_letter4.y;
-            calc_DP_float();
+            calc_DP_float(k+1);
             shuffle_penalty();
         }
         if (haploLength%4 >= 3) {
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
             if (!threadIdInGroup) hap_letter = new_hap_letter4.z;
-            calc_DP_float();
+            calc_DP_float(k+2);
             shuffle_penalty();
         }
         for (k=0; k<result_thread; k++) {
             // hap_letter = __shfl_up_sync(__activemask(), hap_letter, 1, 32);
             hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
-            calc_DP_float();
+            calc_DP_float(-1);
             shuffle_penalty(); // shuffle_penalty_active();
         }
         // adjust I values
@@ -2506,6 +2614,9 @@ double align_host(
 
         for (int col=1; col<=hap_length; col++) {
             float lambda = ((read_base == hap_bases[col-1]) || (read_base == 'N') || (hap_bases[col-1] == 'N')) ?  1.0 - base_qual : base_qual/3.0;
+            //transposed print because kernel has hap as outer loop
+            // std::cout << "row " << (col-1) << ", col " << (row-1) << ", lambda " << lambda << "\n";
+            //std::cout << "row " << (row-1) << ", col " << (col-1) << ", lambda " << lambda << "\n";
             M[target_row*(hap_length+1)+col] = lambda*(alpha*M[source_row*(hap_length+1)+col-1] + beta*(I[source_row*(hap_length+1)+col-1]+D[source_row*(hap_length+1)+col-1]));
             I[target_row*(hap_length+1)+col] = delta*M[source_row*(hap_length+1)+col] + eps*I[source_row*(hap_length+1)+col];
             D[target_row*(hap_length+1)+col] = sigma*M[target_row*(hap_length+1)+col-1] + eps*D[target_row*(hap_length+1)+col-1];
@@ -2828,34 +2939,34 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     // }
 
 
-#if 0
-    thrust::host_vector<int> h_numIndicesPerPartitionPerBatch = d_numIndicesPerPartitionPerBatch;
-    thrust::host_vector<int> h_indicesPerPartitionPerBatch = d_indicesPerPartitionPerBatch;
+    #if 0
+        thrust::host_vector<int> h_numIndicesPerPartitionPerBatch = d_numIndicesPerPartitionPerBatch;
+        thrust::host_vector<int> h_indicesPerPartitionPerBatch = d_indicesPerPartitionPerBatch;
 
-    for(int p = 0; p < numPartitions; p++){
-        if(p <= 4){
-            std::cout << "Partition p = " << p << "\n";
-            std::cout << "numIndicesPerBatch: ";
-            for(int b = 0; b < 100; b++){ // or(int b = 0; b < num_batches; b++){
-                std::cout << h_numIndicesPerPartitionPerBatch[p * num_batches + b] << ", ";
-            }
-            std::cout << "\n";
-
-            std::cout << "indicesPerBatch: ";
-            for(int b = 0; b < 100; b++){ // for(int b = 0; b < num_batches; b++){
-                const int num = h_numIndicesPerPartitionPerBatch[p * num_batches + b];
-                for(int i = 0; i < num; i++){
-                    std::cout << h_indicesPerPartitionPerBatch[p * num_reads + offset_read_batches[b] + i];
-                    if(i != num-1){
-                        std::cout << ", ";
-                    }
+        for(int p = 0; p < numPartitions; p++){
+            if(p <= 4){
+                std::cout << "Partition p = " << p << "\n";
+                std::cout << "numIndicesPerBatch: ";
+                for(int b = 0; b < 100; b++){ // or(int b = 0; b < num_batches; b++){
+                    std::cout << h_numIndicesPerPartitionPerBatch[p * num_batches + b] << ", ";
                 }
-                std::cout << " | ";
+                std::cout << "\n";
+
+                std::cout << "indicesPerBatch: ";
+                for(int b = 0; b < 100; b++){ // for(int b = 0; b < num_batches; b++){
+                    const int num = h_numIndicesPerPartitionPerBatch[p * num_batches + b];
+                    for(int i = 0; i < num; i++){
+                        std::cout << h_indicesPerPartitionPerBatch[p * num_reads + offset_read_batches[b] + i];
+                        if(i != num-1){
+                            std::cout << ", ";
+                        }
+                    }
+                    std::cout << " | ";
+                }
+                std::cout << "\n";
             }
-            std::cout << "\n";
         }
-    }
-#endif
+    #endif
 
     {
         cudaStream_t stream = cudaStreamLegacy;
@@ -3562,34 +3673,34 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
     // }
 
 
-#if 0
-    thrust::host_vector<int> h_numIndicesPerPartitionPerBatch = d_numIndicesPerPartitionPerBatch;
-    thrust::host_vector<int> h_indicesPerPartitionPerBatch = d_indicesPerPartitionPerBatch;
+    #if 0
+        thrust::host_vector<int> h_numIndicesPerPartitionPerBatch = d_numIndicesPerPartitionPerBatch;
+        thrust::host_vector<int> h_indicesPerPartitionPerBatch = d_indicesPerPartitionPerBatch;
 
-    for(int p = 0; p < numPartitions; p++){
-        if(p <= 4){
-            std::cout << "Partition p = " << p << "\n";
-            std::cout << "numIndicesPerBatch: ";
-            for(int b = 0; b < 100; b++){ // or(int b = 0; b < num_batches; b++){
-                std::cout << h_numIndicesPerPartitionPerBatch[p * num_batches + b] << ", ";
-            }
-            std::cout << "\n";
-
-            std::cout << "indicesPerBatch: ";
-            for(int b = 0; b < 100; b++){ // for(int b = 0; b < num_batches; b++){
-                const int num = h_numIndicesPerPartitionPerBatch[p * num_batches + b];
-                for(int i = 0; i < num; i++){
-                    std::cout << h_indicesPerPartitionPerBatch[p * num_reads + offset_read_batches[b] + i];
-                    if(i != num-1){
-                        std::cout << ", ";
-                    }
+        for(int p = 0; p < numPartitions; p++){
+            if(p <= 4){
+                std::cout << "Partition p = " << p << "\n";
+                std::cout << "numIndicesPerBatch: ";
+                for(int b = 0; b < 100; b++){ // or(int b = 0; b < num_batches; b++){
+                    std::cout << h_numIndicesPerPartitionPerBatch[p * num_batches + b] << ", ";
                 }
-                std::cout << " | ";
+                std::cout << "\n";
+
+                std::cout << "indicesPerBatch: ";
+                for(int b = 0; b < 100; b++){ // for(int b = 0; b < num_batches; b++){
+                    const int num = h_numIndicesPerPartitionPerBatch[p * num_batches + b];
+                    for(int i = 0; i < num; i++){
+                        std::cout << h_indicesPerPartitionPerBatch[p * num_reads + offset_read_batches[b] + i];
+                        if(i != num-1){
+                            std::cout << ", ";
+                        }
+                    }
+                    std::cout << " | ";
+                }
+                std::cout << "\n";
             }
-            std::cout << "\n";
         }
-    }
-#endif
+    #endif
 
     {
         cudaStream_t stream = cudaStreamLegacy;
@@ -4310,6 +4421,25 @@ int main(const int argc, char const * const argv[])
     }
 
     if(options.checkResults){
+        const int numBatches = fullBatch.batch_haps.size();
+        std::vector<int> numberOfAlignmentsPerBatch(numBatches);
+        int totalNumberOfAlignments = 0;
+        #pragma omp parallel for reduction(+:totalNumberOfAlignments)
+        for (int i=0; i < numBatches; i++){
+            const int numReadsInBatch = fullBatch.batch_reads[i];
+            const int numHapsInBatch = fullBatch.batch_haps[i];
+            const int numAlignments = numReadsInBatch * numHapsInBatch;
+            numberOfAlignmentsPerBatch[i] = numAlignments;
+            totalNumberOfAlignments += numAlignments;
+        }
+        std::vector<int> numAlignmentsPerBatchInclusivePrefixSum(numBatches);
+        numAlignmentsPerBatchInclusivePrefixSum[0] = numberOfAlignmentsPerBatch[0];
+        for (int i=1; i < numBatches; i++){
+            numAlignmentsPerBatchInclusivePrefixSum[i] 
+                = numAlignmentsPerBatchInclusivePrefixSum[i-1] + numberOfAlignmentsPerBatch[i];
+        }
+
+
         // std::vector<float> resultsCPU2 = processBatchCPU(fullBatch, ph2pr);
         std::vector<float> resultsCPU = processBatchCPUFaster(fullBatch, ph2pr);
         // assert(resultsCPU == resultsCPU2);
@@ -4341,6 +4471,38 @@ int main(const int argc, char const * const argv[])
                 if(numErrors < 5){
                     std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped_float[i] << "\n";
                     std::cout << std::abs(resultsCPU[i] - resultsBatchOverlapped_float[i]) << "\n";
+
+                    const int batchIdByGroupId = std::distance(
+                        numAlignmentsPerBatchInclusivePrefixSum.begin(),
+                        std::upper_bound(
+                            numAlignmentsPerBatchInclusivePrefixSum.begin(),
+                            numAlignmentsPerBatchInclusivePrefixSum.begin() + numBatches,
+                            i
+                        )
+                    );
+                    const int batchId = min(batchIdByGroupId, numBatches-1);
+                    const int numHapsInBatch = fullBatch.batch_haps[batchId];
+                    const int alignmentOffset = (batchId == 0 ? 0 : numAlignmentsPerBatchInclusivePrefixSum[batchId-1]);
+                    const int alignmentIdInBatch = i - alignmentOffset;
+                    const int hapToProcessInBatch = alignmentIdInBatch % numHapsInBatch;
+                    const int readToProcessInBatch = alignmentIdInBatch / numHapsInBatch;
+
+                    int read = fullBatch.batch_reads_offsets[batchId]+readToProcessInBatch;
+                    int read_len = fullBatch.readlen[read];
+                    int hap = fullBatch.batch_haps_offsets[batchId]+hapToProcessInBatch;
+                    int hap_len = fullBatch.haplen[hap];
+                    int h_off = fullBatch.hap_offsets[hap];
+                    int r_off = fullBatch.read_offsets[read];
+                   
+                    std::cout << "batchId " << batchId << ", read " << readToProcessInBatch << ", hap " << hapToProcessInBatch << "\n";
+                    for(int k = 0; k < read_len; k++){
+                        std::cout << fullBatch.reads[r_off + k];
+                    }
+                    std::cout << "\n";
+                    for(int k = 0; k < hap_len; k++){
+                        std::cout << fullBatch.haps[h_off + k];
+                    }
+                    std::cout << "\n";
                 }
                 numErrors++;
             }
