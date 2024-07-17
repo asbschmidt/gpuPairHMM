@@ -5,6 +5,7 @@
 #include <string>
 #include <cmath>
 #include <vector>
+#include <optional>
 
 #include <algorithm>
 #include <iterator>
@@ -97,7 +98,6 @@ struct Options{
     std::string outputfile = "";
     int transferchunksize = 100000;
     bool checkResults = false;
-    int checkResultsDecimalDigits = 3;
 };
 
 template <class T>
@@ -2198,7 +2198,7 @@ void PairHMM_align(
 
 
 struct batch{
-
+public:
     template<class T>
     using Allocator = std::allocator<T>;
     // using Allocator = PinnedAllocator<T>;
@@ -2233,6 +2233,99 @@ struct batch{
     std::vector<float> del_quals;
     std::vector<float> gcp_quals;
     */
+
+    int getTotalNumberOfAlignments() const{
+        if(!totalNumberOfAlignments_opt.has_value()){
+            initTotalNumberOfAlignmentsAndNumPerBatch();
+        }
+        return totalNumberOfAlignments_opt.value();
+    }
+
+    const std::vector<int>& getNumberOfAlignmentsPerBatch() const{
+        if(!numberOfAlignmentsPerBatch_opt.has_value()){
+            initTotalNumberOfAlignmentsAndNumPerBatch();
+        }
+        return numberOfAlignmentsPerBatch_opt.value();
+    }
+
+    const std::vector<int>& getNumberOfAlignmentsPerBatchInclusivePrefixSum() const{
+        if(!numAlignmentsPerBatchInclusivePrefixSum_opt.has_value()){
+            initNumPerBatchInclPrefixSum();
+        }
+        return numAlignmentsPerBatchInclusivePrefixSum_opt.value();
+    }
+
+    struct AlignmentInputInfo{
+        int batchId{};
+        int hapToProcessInBatch{};
+        int readToProcessInBatch{};
+        int alignmentOffset{};
+    };
+
+    AlignmentInputInfo getAlignmentInputInfo(int alignmentId) const {
+        assert(alignmentId < getTotalNumberOfAlignments());
+
+        const int numBatches = batch_haps.size();
+        const int batchIdByAlignmentId = std::distance(
+            getNumberOfAlignmentsPerBatchInclusivePrefixSum().begin(),
+            std::upper_bound(
+                getNumberOfAlignmentsPerBatchInclusivePrefixSum().begin(),
+                getNumberOfAlignmentsPerBatchInclusivePrefixSum().begin() + numBatches,
+                alignmentId
+            )
+        );
+        AlignmentInputInfo inputInfo;
+        const int batchId = min(batchIdByAlignmentId, numBatches-1);
+        const int numHapsInBatch = batch_haps[batchId];
+        const int alignmentOffset = (batchId == 0 ? 0 : getNumberOfAlignmentsPerBatchInclusivePrefixSum()[batchId-1]);
+        const int alignmentIdInBatch = alignmentId - alignmentOffset;
+        const int hapToProcessInBatch = alignmentIdInBatch % numHapsInBatch;
+        const int readToProcessInBatch = alignmentIdInBatch / numHapsInBatch;
+
+        inputInfo.batchId = batchId;
+        inputInfo.hapToProcessInBatch = hapToProcessInBatch;
+        inputInfo.readToProcessInBatch = readToProcessInBatch;
+        inputInfo.alignmentOffset = alignmentOffset;
+
+        return inputInfo;
+    }
+
+private:
+    mutable std::optional<std::vector<int>> numberOfAlignmentsPerBatch_opt;
+    mutable std::optional<std::vector<int>> numAlignmentsPerBatchInclusivePrefixSum_opt;
+    mutable std::optional<int> totalNumberOfAlignments_opt;
+
+    void initTotalNumberOfAlignmentsAndNumPerBatch() const{
+        const int numBatches = batch_haps.size();
+        std::vector<int> numberOfAlignmentsPerBatch(numBatches);
+
+        int sum = 0;
+        #pragma omp parallel for reduction(+:sum)
+        for (int i=0; i < numBatches; i++){
+            const int numReadsInBatch = batch_reads[i];
+            const int numHapsInBatch = batch_haps[i];
+            const int numAlignments = numReadsInBatch * numHapsInBatch;
+            numberOfAlignmentsPerBatch[i] = numAlignments;
+            sum += numAlignments;
+        }
+        totalNumberOfAlignments_opt = sum;
+        numberOfAlignmentsPerBatch_opt = std::move(numberOfAlignmentsPerBatch);
+    } 
+    
+    void initNumPerBatchInclPrefixSum() const{        
+        const int numBatches = batch_haps.size();
+        std::vector<int> numAlignmentsPerBatchInclusivePrefixSum(numBatches);
+        numAlignmentsPerBatchInclusivePrefixSum[0] = getNumberOfAlignmentsPerBatch()[0];
+        for (int i=1; i < numBatches; i++){
+            numAlignmentsPerBatchInclusivePrefixSum[i] 
+                = numAlignmentsPerBatchInclusivePrefixSum[i-1] + getNumberOfAlignmentsPerBatch()[i];
+        }
+        numAlignmentsPerBatchInclusivePrefixSum_opt = std::move(numAlignmentsPerBatchInclusivePrefixSum);
+    }
+
+
+
+
 };
 
 struct pinned_batch{
@@ -2753,22 +2846,8 @@ std::vector<float> processBatchCPUFaster(const batch& batch_, const std::vector<
 
     const int numBatches = batch_.batch_haps.size();
 
-    std::vector<int> numberOfAlignmentsPerBatch(numBatches);
-    int totalNumberOfAlignments = 0;
-    #pragma omp parallel for reduction(+:totalNumberOfAlignments)
-    for (int i=0; i < numBatches; i++){
-        const int numReadsInBatch = batch_.batch_reads[i];
-        const int numHapsInBatch = batch_.batch_haps[i];
-        const int numAlignments = numReadsInBatch * numHapsInBatch;
-        numberOfAlignmentsPerBatch[i] = numAlignments;
-        totalNumberOfAlignments += numAlignments;
-    }
-    std::vector<int> numAlignmentsPerBatchInclusivePrefixSum(numBatches);
-    numAlignmentsPerBatchInclusivePrefixSum[0] = numberOfAlignmentsPerBatch[0];
-    for (int i=1; i < numBatches; i++){
-        numAlignmentsPerBatchInclusivePrefixSum[i] 
-            = numAlignmentsPerBatchInclusivePrefixSum[i-1] + numberOfAlignmentsPerBatch[i];
-    }
+    const int totalNumberOfAlignments = batch_.getTotalNumberOfAlignments();
+    const auto& numAlignmentsPerBatchInclusivePrefixSum = batch_.getNumberOfAlignmentsPerBatchInclusivePrefixSum();
 
     std::vector<float> results(totalNumberOfAlignments);
 
@@ -4275,6 +4354,55 @@ std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default,
 
 
 
+struct ScoreComparisonResult{
+
+};
+
+
+void computeAbsoluteErrorStatistics(const std::vector<float>& scoresA, const std::vector<float>& scoresB){
+    assert(scoresA.size() == scoresB.size());
+
+    std::vector<float> bins{0.0, 0.1, 0.05, 0.01, 0.005, 0.001, 0.0001, 0.00001, 0.000001};
+
+    std::vector<int> numErrorsPerBin(bins.size(), 0);
+
+    for(int b = 0; b < int(bins.size()); b++){
+        for(int i = 0; i < int(scoresA.size()); i++){
+            if(std::abs(scoresA[i] - scoresB[i]) > bins[b]){
+                numErrorsPerBin[b]++;
+            }
+        }
+    }
+
+    for(int b = 0; b < int(bins.size()); b++){
+        std::cout << "num alignments with absolut error > " << bins[b] << " : " << numErrorsPerBin[b] << " (" << double(numErrorsPerBin[b]) / scoresA.size() * 100.0 << " %)\n";
+    }
+}
+
+void computeRelativeErrorStatistics(const std::vector<float>& scoresA, const std::vector<float>& scoresB){
+    assert(scoresA.size() == scoresB.size());
+
+    std::vector<float> bins{0.0, 0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001};
+
+    std::vector<int> numErrorsPerBin(bins.size(), 0);
+
+    for(int b = 0; b < int(bins.size()); b++){
+        for(int i = 0; i < int(scoresA.size()); i++){
+            const float error = std::abs(scoresA[i] - scoresB[i]);
+            const float relError = error / std::abs(scoresA[i]);
+            if(relError > bins[b]){
+                numErrorsPerBin[b]++;
+            }
+        }
+    }
+
+    for(int b = 0; b < int(bins.size()); b++){
+        std::cout << "num alignments with relative error > " << bins[b] << " : " << numErrorsPerBin[b] << " (" << double(numErrorsPerBin[b]) / scoresA.size() * 100.0 << " %)\n";
+    }
+}
+
+
+
 
 int main(const int argc, char const * const argv[])
 {
@@ -4314,10 +4442,6 @@ int main(const int argc, char const * const argv[])
         if(argstring == "--checkResults"){
             options.checkResults = true;
         }
-        if(argstring == "--checkResultsDecimalDigits"){
-            options.checkResultsDecimalDigits = std::atoi(argv[x+1]);
-            x++;
-        }
     }
 
     
@@ -4325,7 +4449,6 @@ int main(const int argc, char const * const argv[])
     std::cout << "options.outputfile = " << options.outputfile << "\n";
     std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
     std::cout << "options.checkResults = " << options.checkResults << "\n";
-    std::cout << "options.checkResultsDecimalDigits = " << options.checkResultsDecimalDigits << "\n";
 
 
     helpers::CpuTimer timerParseInputFile("parse input file");
@@ -4422,92 +4545,84 @@ int main(const int argc, char const * const argv[])
 
     if(options.checkResults){
         const int numBatches = fullBatch.batch_haps.size();
-        std::vector<int> numberOfAlignmentsPerBatch(numBatches);
-        int totalNumberOfAlignments = 0;
-        #pragma omp parallel for reduction(+:totalNumberOfAlignments)
-        for (int i=0; i < numBatches; i++){
-            const int numReadsInBatch = fullBatch.batch_reads[i];
-            const int numHapsInBatch = fullBatch.batch_haps[i];
-            const int numAlignments = numReadsInBatch * numHapsInBatch;
-            numberOfAlignmentsPerBatch[i] = numAlignments;
-            totalNumberOfAlignments += numAlignments;
-        }
-        std::vector<int> numAlignmentsPerBatchInclusivePrefixSum(numBatches);
-        numAlignmentsPerBatchInclusivePrefixSum[0] = numberOfAlignmentsPerBatch[0];
-        for (int i=1; i < numBatches; i++){
-            numAlignmentsPerBatchInclusivePrefixSum[i] 
-                = numAlignmentsPerBatchInclusivePrefixSum[i-1] + numberOfAlignmentsPerBatch[i];
-        }
-
+        const int totalNumberOfAlignments = fullBatch.getTotalNumberOfAlignments();
+        const auto& numAlignmentsPerBatchInclusivePrefixSum = fullBatch.getNumberOfAlignmentsPerBatchInclusivePrefixSum();
 
         // std::vector<float> resultsCPU2 = processBatchCPU(fullBatch, ph2pr);
         std::vector<float> resultsCPU = processBatchCPUFaster(fullBatch, ph2pr);
         // assert(resultsCPU == resultsCPU2);
 
-        double limit = 1.0;
-        for(int i = 0; i < options.checkResultsDecimalDigits; i++){
-            limit /= 10.0;
-        }
 
-        int numErrors = 0;
-        for(int i = 0; i < int(resultsBatchOverlapped.size()); i++){
-            if(std::abs(resultsCPU[i] - resultsBatchOverlapped[i]) > limit){
-                if(numErrors < 5){
-                    std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped[i] << "\n";
-                    std::cout << std::abs(resultsCPU[i] - resultsBatchOverlapped[i]) << "\n";
+
+        std::cout << "comparing half:\n";
+        computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped);
+        computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped);
+
+        std::cout << "comparing float:\n";
+        computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_float);
+        computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_float);
+
+        {
+            constexpr double checklimit = 0.05;
+
+            for(int i = 0, numErrors = 0; i < int(resultsBatchOverlapped.size()); i++){
+                const float absError = std::abs(resultsCPU[i] - resultsBatchOverlapped[i]);
+                if(absError > checklimit){
+                    if(numErrors == 0){
+                        std::cout << "some half error inputs:\n";
+                    }
+                    if(numErrors < 5){
+                        std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped[i] << ", abs error " << absError << "\n";
+                    }
+                    numErrors++;
                 }
-                numErrors++;
             }
-        }
-        std::cout << "half Comparison with cpu results finished. diff limit " << limit << ". errors: " << numErrors << "\n";
 
-        // for(int i = 0; i < int(resultsBatchAsWhole.size()); i++){
-        //     std::cout << "i " << i << " : " << resultsCPU[i] << " " << resultsBatchAsWhole[i] << " " <<  resultsBatchOverlapped[i] << "\n";
-        // }
+            for(int i = 0, numErrors = 0; i < int(resultsBatchOverlapped_float.size()); i++){
+                const float absError = std::abs(resultsCPU[i] - resultsBatchOverlapped_float[i]);
+                if(absError > checklimit){
+                    if(numErrors == 0){
+                        std::cout << "some float error inputs:\n";
+                    }
+                    if(numErrors < 5){
+                        std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped[i] << ", abs error " << absError << "\n";
 
-        numErrors = 0;
-        for(int i = 0; i < int(resultsBatchOverlapped_float.size()); i++){
-            if(std::abs(resultsCPU[i] - resultsBatchOverlapped_float[i]) > limit){
-                if(numErrors < 5){
-                    std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped_float[i] << "\n";
-                    std::cout << std::abs(resultsCPU[i] - resultsBatchOverlapped_float[i]) << "\n";
-
-                    const int batchIdByGroupId = std::distance(
-                        numAlignmentsPerBatchInclusivePrefixSum.begin(),
-                        std::upper_bound(
+                        const int batchIdByGroupId = std::distance(
                             numAlignmentsPerBatchInclusivePrefixSum.begin(),
-                            numAlignmentsPerBatchInclusivePrefixSum.begin() + numBatches,
-                            i
-                        )
-                    );
-                    const int batchId = min(batchIdByGroupId, numBatches-1);
-                    const int numHapsInBatch = fullBatch.batch_haps[batchId];
-                    const int alignmentOffset = (batchId == 0 ? 0 : numAlignmentsPerBatchInclusivePrefixSum[batchId-1]);
-                    const int alignmentIdInBatch = i - alignmentOffset;
-                    const int hapToProcessInBatch = alignmentIdInBatch % numHapsInBatch;
-                    const int readToProcessInBatch = alignmentIdInBatch / numHapsInBatch;
+                            std::upper_bound(
+                                numAlignmentsPerBatchInclusivePrefixSum.begin(),
+                                numAlignmentsPerBatchInclusivePrefixSum.begin() + numBatches,
+                                i
+                            )
+                        );
+                        const int batchId = min(batchIdByGroupId, numBatches-1);
+                        const int numHapsInBatch = fullBatch.batch_haps[batchId];
+                        const int alignmentOffset = (batchId == 0 ? 0 : numAlignmentsPerBatchInclusivePrefixSum[batchId-1]);
+                        const int alignmentIdInBatch = i - alignmentOffset;
+                        const int hapToProcessInBatch = alignmentIdInBatch % numHapsInBatch;
+                        const int readToProcessInBatch = alignmentIdInBatch / numHapsInBatch;
 
-                    int read = fullBatch.batch_reads_offsets[batchId]+readToProcessInBatch;
-                    int read_len = fullBatch.readlen[read];
-                    int hap = fullBatch.batch_haps_offsets[batchId]+hapToProcessInBatch;
-                    int hap_len = fullBatch.haplen[hap];
-                    int h_off = fullBatch.hap_offsets[hap];
-                    int r_off = fullBatch.read_offsets[read];
-                   
-                    std::cout << "batchId " << batchId << ", read " << readToProcessInBatch << ", hap " << hapToProcessInBatch << "\n";
-                    for(int k = 0; k < read_len; k++){
-                        std::cout << fullBatch.reads[r_off + k];
+                        int read = fullBatch.batch_reads_offsets[batchId]+readToProcessInBatch;
+                        int read_len = fullBatch.readlen[read];
+                        int hap = fullBatch.batch_haps_offsets[batchId]+hapToProcessInBatch;
+                        int hap_len = fullBatch.haplen[hap];
+                        int h_off = fullBatch.hap_offsets[hap];
+                        int r_off = fullBatch.read_offsets[read];
+                    
+                        std::cout << "batchId " << batchId << ", read nr" << readToProcessInBatch << ", hap nr" << hapToProcessInBatch << "\n";
+                        for(int k = 0; k < read_len; k++){
+                            std::cout << fullBatch.reads[r_off + k];
+                        }
+                        std::cout << "\n";
+                        for(int k = 0; k < hap_len; k++){
+                            std::cout << fullBatch.haps[h_off + k];
+                        }
+                        std::cout << "\n";
                     }
-                    std::cout << "\n";
-                    for(int k = 0; k < hap_len; k++){
-                        std::cout << fullBatch.haps[h_off + k];
-                    }
-                    std::cout << "\n";
+                    numErrors++;
                 }
-                numErrors++;
             }
         }
-        std::cout << "float Comparison with cpu results finished. diff limit " << limit << ". errors: " << numErrors << "\n";
     }
 
     // int res_off = 0;
