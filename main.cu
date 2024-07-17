@@ -690,6 +690,364 @@ void PairHMM_align_partition_half_allowMultipleBatchesPerWarp(
 }
 
 
+template <int group_size, int numRegs> 
+__global__
+void PairHMM_align_partition_float_allowMultipleBatchesPerWarp(
+    const uint8_t * read_chars,
+    const uint8_t * hap_chars,
+    const uint8_t * base_quals,
+    const uint8_t * ins_quals,
+    const uint8_t * del_quals,
+    float * devAlignmentScores,
+    const int* read_offsets,
+    const int* hap_offsets,
+    const int* read_length,
+    const int* hap_length,
+    const int *reads_in_batch,
+    const int *haps_in_batch,
+    const int *offset_hap_batches,
+
+    const int* numIndicesPerBatch,
+    const int* indicesPerBatch,
+    const int* numReadsPerBatchPrefixSum,
+    const int numBatches,
+    const int* resultOffsetsPerBatch,
+
+    const int* numAlignmentsPerBatch,
+    const int* numAlignmentsPerBatchInclusivePrefixSum,
+    const int numAlignments
+) {
+
+    alignas(8) __shared__ float2 lambda_array[5][16*numRegs];
+
+    float M[numRegs], I, D[numRegs];
+    float alpha[numRegs], delta[numRegs], sigma[numRegs];
+    float Results[numRegs];
+
+    const int threadIdInGroup = threadIdx.x % group_size;
+    const int groupIdInBlock = threadIdx.x / group_size;
+    const int groupIdInGrid = (threadIdx.x + blockIdx.x * blockDim.x) / group_size;
+    const unsigned int myGroupMask = __match_any_sync(0xFFFFFFFF, groupIdInGrid); //compute mask for all threads with same groupIdInGrid
+    
+    // const int numGroupsInGrid = blockDim.x * gridDim.x / group_size;
+    // for(int alignmentId = groupIdInGrid; alignmentId < numAlignments; alignmentId += numGroupsInGrid){
+    const int alignmentId = groupIdInGrid;
+    if(alignmentId < numAlignments){
+
+        const int batchIdByGroupId = thrust::distance(
+            numAlignmentsPerBatchInclusivePrefixSum,
+            thrust::upper_bound(thrust::seq,
+                numAlignmentsPerBatchInclusivePrefixSum,
+                numAlignmentsPerBatchInclusivePrefixSum + numBatches,
+                alignmentId
+            )
+        );
+        const int batchId = min(batchIdByGroupId, numBatches-1);
+        const int groupIdInBatch = alignmentId - (batchId == 0 ? 0 : numAlignmentsPerBatchInclusivePrefixSum[batchId-1]);
+        const int hapToProcessInBatch = groupIdInBatch % haps_in_batch[batchId];
+        const int readIndexToProcessInBatch = groupIdInBatch / haps_in_batch[batchId];
+
+        const int offset_read_batches = numReadsPerBatchPrefixSum[batchId];
+        const int offset_read_batches_inChunk = offset_read_batches - numReadsPerBatchPrefixSum[0];
+        const int readToProcessInBatch = indicesPerBatch[offset_read_batches_inChunk + readIndexToProcessInBatch];
+
+        const int read_nr = readToProcessInBatch;
+        // const int global_read_id = read_nr + offset_read_batches;
+        const int read_id_inChunk = read_nr + offset_read_batches_inChunk;
+
+
+        const int byteOffsetForRead = read_offsets[read_id_inChunk];
+        const int readLength = read_length[read_id_inChunk];
+
+        const int b_h_off = offset_hap_batches[batchId];
+        const int b_h_off_inChunk = b_h_off - offset_hap_batches[0];
+        const int bytesOffsetForHap = hap_offsets[hapToProcessInBatch+b_h_off_inChunk];
+        const char4* const HapsAsChar4 = reinterpret_cast<const char4*>(&hap_chars[bytesOffsetForHap]);
+        const int haploLength = hap_length[hapToProcessInBatch+b_h_off_inChunk];
+
+        const int resultOutputIndex = resultOffsetsPerBatch[batchId] + read_nr*haps_in_batch[batchId]+hapToProcessInBatch;
+        // if(threadIdInGroup == 0){
+        //     printf("group %d, batchIdByGroupId %d, batchId %d, groupIdInBatch %d, hapToProcessInBatch %d, readIndexToProcessInBatch %d, readToProcessInBatch %d, numAlignments %d\n"
+        //         "resultOffsetsPerBatch %d, haps_in_batch %d, resultOutputIndex %d\n",
+        //         alignmentId, batchIdByGroupId, batchId, groupIdInBatch, hapToProcessInBatch, readIndexToProcessInBatch, readToProcessInBatch, numAlignments,
+        //         resultOffsetsPerBatch[batchId], haps_in_batch[batchId], resultOutputIndex);
+        // }
+
+
+        // if(alignmentId < 10 && group_size == 8 && numRegs == 8){
+            // if(threadIdInGroup == 0){
+            //     printf("group %d, batchId %d, groupIdInBatch %d, hapToProcessInBatch %d, readIndexToProcessInBatch %d, readToProcessInBatch %d, readLength %d, haploLength %d, numAlignments %d\n"
+            //         "offset_read_batches %d, readToProcessInBatch %d, byteOffsetForRead %d, b_h_off %d, bytesOffsetForHap %d\n"
+            //         "resultOffsetsPerBatch %d, haps_in_batch %d\n",
+            //         alignmentId, batchId, groupIdInBatch, hapToProcessInBatch, readIndexToProcessInBatch, readToProcessInBatch, readLength, haploLength, numAlignments,
+            //         offset_read_batches, readToProcessInBatch, byteOffsetForRead, b_h_off, bytesOffsetForHap,
+            //         resultOffsetsPerBatch[batchId], haps_in_batch[batchId]);
+            // }
+        // }
+
+        const float eps = 0.1;
+        const float beta = 0.9;
+        float M_l, D_l, M_ul, D_ul, I_ul;
+        float penalty_temp0, penalty_temp1, penalty_temp2, penalty_temp3;
+        float init_D;
+
+        const float constant = ::cuda::std::numeric_limits<float>::max() / 16;
+
+        auto load_PSSM = [&]() {
+
+            char4 temp0, temp1;
+            const float one = 1.0;
+            const float three = 3.0;
+            const char4* QualsAsChar4 = reinterpret_cast<const char4*>(&base_quals[byteOffsetForRead]);
+            const char4* ReadsAsChar4 = reinterpret_cast<const char4*>(&read_chars[byteOffsetForRead]);
+            for (int i=threadIdInGroup; i<(readLength+3)/4; i+=group_size) {
+                float2 temp_h2, temp_h3;
+                temp0 = QualsAsChar4[i];
+                temp1 = ReadsAsChar4[i];
+                temp_h2.x = cPH2PR[uint8_t(temp0.x)];
+                temp_h2.y = cPH2PR[uint8_t(temp0.y)];
+                temp_h3.x = temp_h2.x/three;
+                temp_h3.y = temp_h2.y/three;
+                for (int j=0; j<5; j++) lambda_array[j][2*i+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
+                if (temp1.x <= 4) lambda_array[temp1.x][2*i+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x;
+                if (temp1.y <= 4) lambda_array[temp1.y][2*i+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y;
+                temp_h2.x = cPH2PR[uint8_t(temp0.z)];
+                temp_h2.y = cPH2PR[uint8_t(temp0.w)];
+                temp_h3.x = temp_h2.x/three;
+                temp_h3.y = temp_h2.y/three;
+                for (int j=0; j<5; j++) lambda_array[j][2*i+1+groupIdInBlock*(group_size*numRegs/2)] = temp_h3;
+                if (temp1.z <= 4) lambda_array[temp1.z][2*i+1+groupIdInBlock*(group_size*numRegs/2)].x = one - temp_h2.x;
+                if (temp1.w <= 4) lambda_array[temp1.w][2*i+1+groupIdInBlock*(group_size*numRegs/2)].y = one - temp_h2.y;
+            }
+
+            __syncwarp(myGroupMask);
+
+        };
+
+        auto load_probabilities = [&]() {
+            char4 temp0, temp1;
+            const char4* InsQualsAsChar4 = reinterpret_cast<const char4*>(&ins_quals[byteOffsetForRead]);
+            const char4* DelQualsAsChar4 = reinterpret_cast<const char4*>(&del_quals[byteOffsetForRead]);
+            for (int i=0; i<numRegs/4; i++) {
+                if (threadIdInGroup*numRegs/4+i < (readLength+3)/4) {
+
+                    temp0 = InsQualsAsChar4[threadIdInGroup*numRegs/4+i];
+                    temp1 = DelQualsAsChar4[threadIdInGroup*numRegs/4+i];
+
+                    delta[4*i] = cPH2PR[uint8_t(temp0.x)];
+                    delta[4*i+1] = cPH2PR[uint8_t(temp0.y)];
+                    delta[4*i+2] = cPH2PR[uint8_t(temp0.z)];
+                    delta[4*i+3] = cPH2PR[uint8_t(temp0.w)];
+            //        delta[2*i] = __floats2half2_rn(cPH2PR[uint8_t(temp0.x)],cPH2PR[uint8_t(temp0.y)]);
+            //        delta[2*i+1] = __floats2half2_rn(cPH2PR[uint8_t(temp0.z)],cPH2PR[uint8_t(temp0.w)]);
+
+                    sigma[4*i] = cPH2PR[uint8_t(temp1.x)];
+                    sigma[4*i+1] = cPH2PR[uint8_t(temp1.y)];
+                    sigma[4*i+2] = cPH2PR[uint8_t(temp1.z)];
+                    sigma[4*i+3] = cPH2PR[uint8_t(temp1.w)];
+            //        sigma[2*i] = __floats2half2_rn(cPH2PR[uint8_t(temp1.x)],cPH2PR[uint8_t(temp1.y)]);
+            //        sigma[2*i+1] = __floats2half2_rn(cPH2PR[uint8_t(temp1.z)],cPH2PR[uint8_t(temp1.w)]);
+
+                    alpha[4*i] = 1.0 - (delta[4*i] + sigma[4*i]);
+                    alpha[4*i+1] = 1.0 - (delta[4*i+1] + sigma[4*i+1]);
+                    alpha[4*i+2] = 1.0 - (delta[4*i+2] + sigma[4*i+2]);
+                    alpha[4*i+3] = 1.0 - (delta[4*i+3] + sigma[4*i+3]);
+                //    alpha[2*i] = __float2half2_rn(1.0) - __hadd2(delta[2*i], sigma[2*i]);
+                //    alpha[2*i+1] = __float2half2_rn(1.0) - __hadd2(delta[2*i+1], sigma[2*i+1]);
+                }
+            }
+
+        };
+
+        auto init_penalties = [&]() {
+            #pragma unroll
+            for (int i=0; i<numRegs; i++) M[i] = D[i] = Results[i] = 0.0;
+            M_l = M_ul = D_ul = I_ul = D_l = I = 0.0;
+            if (!threadIdInGroup) D_l = D_ul = init_D;
+        };
+
+
+        char hap_letter;
+
+        
+        auto calc_DP_float = [&](){
+            
+            // __half2 score2;
+            float2* sbt_row = lambda_array[hap_letter];
+            float4 foo = *((float4*)&sbt_row[threadIdx.x*numRegs/2]);
+            //memcpy(&score2, &foo.x, sizeof(float2));
+            penalty_temp0 = M[0];
+            penalty_temp1 = D[0];
+            M[0] = foo.x * fmaf(alpha[0],M_ul,beta*(I_ul+D_ul));
+            D[0] = fmaf(sigma[0],penalty_temp0,eps*D[0]);
+            I = fmaf(delta[0],M_ul,eps*I_ul);
+            Results[0] += M[0] + I;
+            penalty_temp2 = M[1];
+            penalty_temp3 = D[1];
+            M[1] = foo.y * fmaf(alpha[1],penalty_temp0,beta*(I+penalty_temp1));
+            D[1] = fmaf(sigma[1],penalty_temp2,eps*D[1]);
+            I = fmaf(delta[1],penalty_temp0,eps*I);
+            Results[1] += M[1] + I;
+
+            //memcpy(&score2, &foo.z, sizeof(float2));
+            penalty_temp0 = M[2];
+            penalty_temp1 = D[2];
+            M[2] = foo.z * fmaf(alpha[2],penalty_temp2,beta*(I+penalty_temp3));
+            D[2] = fmaf(sigma[2],penalty_temp0,eps*D[2]);
+            I = fmaf(delta[2],penalty_temp2,eps*I);
+            Results[2] += M[2] + I;
+            penalty_temp2 = M[3];
+            penalty_temp3 = D[3];
+            M[3] = foo.w * fmaf(alpha[3],penalty_temp0,beta*(I+penalty_temp1));
+            D[3] = fmaf(sigma[3],penalty_temp2,eps*D[3]);
+            I = fmaf(delta[3],penalty_temp0,eps*I);
+            Results[3] += M[3] + I;
+
+            #pragma unroll
+            for (int i=1; i<numRegs/4; i++) {
+                float4 foo = *((float4*)&sbt_row[threadIdx.x*numRegs/2+2*i]);
+                //memcpy(&score2, &foo.x, sizeof(float2));
+                penalty_temp0 = M[4*i];
+                penalty_temp1 = D[4*i];
+                M[4*i] = foo.x * fmaf(alpha[4*i],penalty_temp2,beta*(I+penalty_temp3));
+                D[4*i] = fmaf(sigma[4*i],penalty_temp0,eps*D[4*i]);
+                I = fmaf(delta[4*i],penalty_temp2,eps*I);
+                Results[4*i] += M[4*i] + I;
+                penalty_temp2 = M[4*i+1];
+                penalty_temp3 = D[4*i+1];
+                M[4*i+1] = foo.y * fmaf(alpha[4*i+1],penalty_temp0,beta*(I+penalty_temp1));
+                D[4*i+1] = fmaf(sigma[4*i+1],penalty_temp2,eps*D[4*i+1]);
+                I = fmaf(delta[4*i+1],penalty_temp0,eps*I);
+                Results[4*i+1] += M[4*i+1] + I;
+
+                //memcpy(&score2, &foo.z, sizeof(float2));
+                penalty_temp0 = M[4*i+2];
+                penalty_temp1 = D[4*i+2];
+                M[4*i+2] = foo.z * fmaf(alpha[4*i+2],penalty_temp2,beta*(I+penalty_temp3));
+                D[4*i+2] = fmaf(sigma[4*i+2],penalty_temp0,eps*D[4*i+2]);
+                I = fmaf(delta[4*i+2],penalty_temp2,eps*I);
+                Results[4*i+2] += M[4*i+2] + I;
+
+                penalty_temp2 = M[4*i+3];
+                penalty_temp3 = D[4*i+3];
+                M[4*i+3] = foo.w * fmaf(alpha[4*i+3],penalty_temp0,beta*(I+penalty_temp1));
+                D[4*i+3] = fmaf(sigma[4*i+3],penalty_temp2,eps*D[4*i+3]);
+                I = fmaf(delta[4*i+3],penalty_temp0,eps*I);
+                Results[4*i+3] += M[4*i+3] + I;
+            }
+        };
+
+        auto shuffle_penalty = [&]() {
+            M_ul = M_l;
+            D_ul = D_l;
+
+            M_l = __shfl_up_sync(myGroupMask, M[numRegs-1], 1, group_size);
+            I_ul = __shfl_up_sync(myGroupMask, I, 1, group_size);
+            D_l = __shfl_up_sync(myGroupMask, D[numRegs-1], 1, group_size);
+
+            if (!threadIdInGroup) {
+                M_l = I_ul = 0.0;
+                D_l = init_D;
+            }
+        };
+
+        int result_thread = (readLength-1)/numRegs;
+        int result_reg = (readLength-1)%numRegs;
+
+        load_PSSM();
+        load_probabilities();
+        // compute_probabilities();
+
+        init_D = constant/haploLength;
+        init_penalties();
+
+        char4 new_hap_letter4;
+        hap_letter = 4;
+        int k;
+        for (k=0; k<haploLength-3; k+=4) {
+            new_hap_letter4 = HapsAsChar4[k/4];
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.x;
+            calc_DP_float();
+            shuffle_penalty();
+
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.y;
+            calc_DP_float();
+            shuffle_penalty();
+
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.z;
+            calc_DP_float();
+            shuffle_penalty();
+
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.w;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        if (haploLength%4 >= 1) {
+            new_hap_letter4 = HapsAsChar4[k/4];
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.x;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        if (haploLength%4 >= 2) {
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.y;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        if (haploLength%4 >= 3) {
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            if (!threadIdInGroup) hap_letter = new_hap_letter4.z;
+            calc_DP_float();
+            shuffle_penalty();
+        }
+        for (k=0; k<result_thread; k++) {
+            // hap_letter = __shfl_up_sync(__activemask(), hap_letter, 1, 32);
+            hap_letter = __shfl_up_sync(myGroupMask, hap_letter, 1, group_size);
+            calc_DP_float();
+            shuffle_penalty(); // shuffle_penalty_active();
+        }
+        // adjust I values
+        I = fmaf(delta[0],M_ul,eps*I_ul);
+        Results[0] += I;
+        I = fmaf(delta[1],M[0],eps*I);
+        Results[1] += I;
+        for (int p=1; p<numRegs/2; p++) {
+            I = fmaf(delta[2*p],M[2*p-1],eps*I);
+            Results[2*p] += I;
+            I = fmaf(delta[2*p+1],M[2*p],eps*I);
+            Results[2*p+1] += I;
+        }
+        // adjust I values
+        //I = fmaf(delta[0],M_ul,eps*I_ul);
+        //Results[0] += I;
+        //for (int p=1; p<numRegs; p++) {
+        //    I = fmaf(delta[p],M[p-1],eps*I);
+        //    Results[p] += I;
+        //}
+
+
+        if (threadIdInGroup == result_thread) {
+            float temp_res = Results[result_reg];
+            temp_res =  log10f(temp_res) - log10f(constant);
+            devAlignmentScores[resultOutputIndex] = temp_res;
+        }
+    }
+
+
+}
+
+
+
+
+
+//###################################################################
+
+
 template <int group_size, int numRegs> __global__
 void PairHMM_align_partition_half(
     const uint8_t * read_chars,
@@ -3074,6 +3432,738 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
 
 
 
+std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Options& /*options*/){
+    helpers::CpuTimer totalTimer("processBatchAsWhole_float");
+
+    const uint8_t* read_chars       = fullBatch.reads.data(); //batch_2.chars.data();
+    const uint read_bytes = fullBatch.reads.size();
+    const uint8_t* hap_chars       = fullBatch.haps.data(); //batch_2.chars.data();
+    const uint hap_bytes = fullBatch.haps.size();
+    const uint8_t* base_qual       = fullBatch.base_quals.data(); //batch_2.chars.data();
+    const uint8_t* ins_qual       = fullBatch.ins_quals.data(); //batch_2.chars.data();
+    const uint8_t* del_qual       = fullBatch.del_quals.data(); //batch_2.chars.data();
+    const int* offset_reads       = fullBatch.read_offsets.data(); //batch_2.chars.data();
+    const int* offset_haps       = fullBatch.hap_offsets.data(); //batch_2.chars.data();
+    const int* read_len       = fullBatch.readlen.data(); //batch_2.chars.data();
+    const int* hap_len       = fullBatch.haplen.data(); //batch_2.chars.data();
+    const int num_reads = fullBatch.readlen.size(); //batch_2.chars.data();
+    const int num_haps = fullBatch.haplen.size(); //batch_2.chars.data();
+    const int num_batches = fullBatch.batch_reads.size(); //batch_2.chars.data();
+    const int* hap_batches       = fullBatch.batch_haps.data(); //batch_2.chars.data();
+    const int* read_batches       = fullBatch.batch_reads.data(); //batch_2.chars.data();
+    const int* offset_hap_batches       = fullBatch.batch_haps_offsets.data(); //batch_2.chars.data();
+    const int* offset_read_batches       = fullBatch.batch_reads_offsets.data(); //batch_2.chars.data();
+
+    int totalNumberOfAlignments = 0;
+    for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
+
+    std::vector<float> alignment_scores_float(totalNumberOfAlignments);
+    std::cout << "Calculating:  " << totalNumberOfAlignments << " alignments in " << num_batches << " batches \n";
+    std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
+    std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
+
+
+    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch);
+
+    cudaStream_t streams_part[numPartitions];
+    for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
+
+    thrust::device_vector<uint8_t> dev_read_chars_vec(read_bytes);
+    thrust::device_vector<uint8_t> dev_hap_chars_vec(hap_bytes);
+    thrust::device_vector<uint8_t> dev_base_qual_vec(read_bytes);
+    thrust::device_vector<uint8_t> dev_ins_qual_vec(read_bytes);
+    thrust::device_vector<uint8_t> dev_del_qual_vec(read_bytes);
+
+    thrust::device_vector<int> dev_offset_reads_vec(num_reads);
+    thrust::device_vector<int> dev_offset_haps_vec(num_haps);
+    thrust::device_vector<int> dev_read_len_vec(num_reads);
+    thrust::device_vector<int> dev_hap_len_vec(num_haps);
+    thrust::device_vector<int> dev_read_batches_vec(num_batches);
+    thrust::device_vector<int> dev_hap_batches_vec(num_batches);
+    thrust::device_vector<int> dev_offset_read_batches_vec(num_batches);
+    thrust::device_vector<int> dev_offset_hap_batches_vec(num_batches);
+    thrust::device_vector<float> devAlignmentScoresFloat_vec(totalNumberOfAlignments);
+
+    uint8_t* const dev_read_chars = dev_read_chars_vec.data().get();
+    uint8_t* const dev_hap_chars = dev_hap_chars_vec.data().get();
+    uint8_t* const dev_base_qual = dev_base_qual_vec.data().get();
+    uint8_t* const dev_ins_qual = dev_ins_qual_vec.data().get();
+    uint8_t* const dev_del_qual = dev_del_qual_vec.data().get();
+    int* const dev_offset_reads = dev_offset_reads_vec.data().get();
+    int* const dev_offset_haps = dev_offset_haps_vec.data().get();
+    int* const dev_read_len = dev_read_len_vec.data().get();
+    int* const dev_hap_len = dev_hap_len_vec.data().get();
+    int* const dev_read_batches = dev_read_batches_vec.data().get();
+    int* const dev_hap_batches = dev_hap_batches_vec.data().get();
+    int* const dev_offset_read_batches = dev_offset_read_batches_vec.data().get();
+    int* const dev_offset_hap_batches = dev_offset_hap_batches_vec.data().get();
+    float* const devAlignmentScoresFloat = devAlignmentScoresFloat_vec.data().get();
+
+
+    helpers::CpuTimer transfertimer("DATA_TRANSFER");
+    cudaMemcpy(dev_read_chars, read_chars, read_bytes, cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_hap_chars, hap_chars, hap_bytes, cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_base_qual, base_qual, read_bytes, cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_ins_qual, ins_qual, read_bytes, cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_del_qual, del_qual, read_bytes, cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_offset_reads, offset_reads, num_reads*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_offset_haps, offset_haps, num_haps*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_read_len, read_len, num_reads*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_hap_len, hap_len, num_haps*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_offset_read_batches, offset_read_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_offset_hap_batches, offset_hap_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_read_batches, read_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    cudaMemcpy(dev_hap_batches, hap_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
+    transfertimer.print();
+
+    //print_batch(fullBatch); // prints first reads/qualities and haplotype per batch.
+
+    convert_DNA<<<num_reads, 128>>>(dev_read_chars,read_bytes);
+    convert_DNA<<<num_haps, 128>>>(dev_hap_chars,hap_bytes);
+
+    thrust::device_vector<int> d_numIndicesPerPartitionPerBatch(num_batches * numPartitions, 0);
+    thrust::device_vector<int> d_indicesPerPartitionPerBatch(num_reads * numPartitions, -1);
+    thrust::device_vector<int> d_resultOffsetsPerBatch(num_batches);
+    thrust::device_vector<int> d_numAlignmentsPerBatch(num_batches * numPartitions);
+    thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
+    thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
+
+    partitionIndicesKernel<<<num_batches, 128>>>(
+        d_numIndicesPerPartitionPerBatch.data().get(),
+        d_indicesPerPartitionPerBatch.data().get(),
+        dev_read_len,
+        dev_read_batches,
+        dev_offset_read_batches,
+        num_batches,
+        num_reads
+    );
+    CUERR;
+
+    thrust::transform(
+        thrust::cuda::par_nosync.on((cudaStream_t)0),
+        dev_read_batches,
+        dev_read_batches + num_batches,
+        dev_hap_batches,
+        d_resultOffsetsPerBatch.begin(),
+        thrust::multiplies<int>{}
+    );
+    thrust::exclusive_scan(
+        thrust::cuda::par_nosync(ThrustCudaMallocAsyncAllocator<int>((cudaStream_t)0)).on((cudaStream_t)0),
+        d_resultOffsetsPerBatch.begin(),
+        d_resultOffsetsPerBatch.begin() + num_batches,
+        d_resultOffsetsPerBatch.begin()
+    );
+
+    // for(int i = 0; i < std::min(10, num_batches); i++){
+    //     std::cout << "batch " << i << ", num reads: " << read_batches[i]
+    //         << ", num haps " << hap_batches[i] << ", product: " <<
+    //         read_batches[i] * hap_batches[i]
+    //         << ", offset : " << d_resultOffsetsPerBatch[i] << "\n";
+    // }
+
+
+#if 0
+    thrust::host_vector<int> h_numIndicesPerPartitionPerBatch = d_numIndicesPerPartitionPerBatch;
+    thrust::host_vector<int> h_indicesPerPartitionPerBatch = d_indicesPerPartitionPerBatch;
+
+    for(int p = 0; p < numPartitions; p++){
+        if(p <= 4){
+            std::cout << "Partition p = " << p << "\n";
+            std::cout << "numIndicesPerBatch: ";
+            for(int b = 0; b < 100; b++){ // or(int b = 0; b < num_batches; b++){
+                std::cout << h_numIndicesPerPartitionPerBatch[p * num_batches + b] << ", ";
+            }
+            std::cout << "\n";
+
+            std::cout << "indicesPerBatch: ";
+            for(int b = 0; b < 100; b++){ // for(int b = 0; b < num_batches; b++){
+                const int num = h_numIndicesPerPartitionPerBatch[p * num_batches + b];
+                for(int i = 0; i < num; i++){
+                    std::cout << h_indicesPerPartitionPerBatch[p * num_reads + offset_read_batches[b] + i];
+                    if(i != num-1){
+                        std::cout << ", ";
+                    }
+                }
+                std::cout << " | ";
+            }
+            std::cout << "\n";
+        }
+    }
+#endif
+
+    {
+        cudaStream_t stream = cudaStreamLegacy;
+
+        int* d_numAlignmentsPerPartitionPerBatch = d_numAlignmentsPerBatchInclPrefixSum.data().get(); // reuse
+        const int* d_numHaplotypesPerBatch = dev_hap_batches;
+        computeAlignmentsPerPartitionPerBatch<<<dim3(SDIV(num_batches, 128), numPartitions), 128,0, stream>>>(
+            d_numAlignmentsPerPartitionPerBatch,
+            d_numIndicesPerPartitionPerBatch.data().get(),
+            d_numHaplotypesPerBatch,
+            numPartitions, 
+            num_batches
+        ); CUERR;
+
+        auto offsets = thrust::make_transform_iterator(
+            thrust::make_counting_iterator(0),
+            [num_batches] __host__ __device__(int partition){
+                return partition * num_batches;
+            }
+        );
+        size_t temp_storage_bytes = 0;
+        cub::DeviceSegmentedReduce::Sum(nullptr, temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
+            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, stream); CUERR;
+        thrust::device_vector<char, ThrustCudaMallocAsyncAllocator<char>> d_temp(temp_storage_bytes, ThrustCudaMallocAsyncAllocator<char>(stream));
+        cub::DeviceSegmentedReduce::Sum(d_temp.data().get(), temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
+            d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, stream); CUERR;
+    }
+    thrust::host_vector<int> h_numAlignmentsPerPartition = d_numAlignmentsPerPartition;
+
+    std::cout << "h_numAlignmentsPerPartition: ";
+    for(int i = 0; i< numPartitions; i++){
+        std::cout << h_numAlignmentsPerPartition[i] << ", ";
+    }
+    std::cout << "\n";
+
+    cudaMemset(devAlignmentScoresFloat, 0, totalNumberOfAlignments * sizeof(float)); CUERR;
+    helpers::GpuTimer computeTimer("PAIR_HMM_PARTITIONED_COMBINED");
+
+    #define COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(stream) \
+        constexpr int groupsPerBlock = blocksize / group_size; \
+        const int numAlignmentsInPartition = h_numAlignmentsPerPartition[partitionId]; \
+        const int numBlocks = SDIV(numAlignmentsInPartition, groupsPerBlock); \
+        const int* d_numIndicesPerBatch = d_numIndicesPerPartitionPerBatch.data().get() + partitionId*num_batches; \
+        thrust::transform( \
+            thrust::cuda::par_nosync.on(stream), \
+            d_numIndicesPerBatch, \
+            d_numIndicesPerBatch + num_batches, \
+            dev_hap_batches, \
+            d_numAlignmentsPerBatch.begin() + partitionId * num_batches, \
+            thrust::multiplies<int>{} \
+        ); \
+        thrust::inclusive_scan( \
+            thrust::cuda::par_nosync(ThrustCudaMallocAsyncAllocator<int>(stream)).on(stream), \
+            d_numAlignmentsPerBatch.begin() + partitionId * num_batches, \
+            d_numAlignmentsPerBatch.begin() + partitionId * num_batches+ num_batches, \
+            d_numAlignmentsPerBatchInclPrefixSum.begin() + partitionId * num_batches \
+        );  \
+        PairHMM_align_partition_float_allowMultipleBatchesPerWarp<group_size,numRegs><<<numBlocks, blocksize,0,stream>>>(dev_read_chars, dev_hap_chars, dev_base_qual, dev_ins_qual, dev_del_qual, devAlignmentScoresFloat, dev_offset_reads, dev_offset_haps, dev_read_len, dev_hap_len, dev_read_batches, dev_hap_batches, dev_offset_hap_batches,  \
+            d_numIndicesPerBatch, d_indicesPerPartitionPerBatch.data().get() + partitionId*num_reads,  \
+            dev_offset_read_batches,  num_batches, d_resultOffsetsPerBatch.data().get(), d_numAlignmentsPerBatch.data().get() + partitionId * num_batches, d_numAlignmentsPerBatchInclPrefixSum.data().get() + partitionId * num_batches, numAlignmentsInPartition); \
+
+
+    if (h_numAlignmentsPerPartition[0]){
+        constexpr int partitionId = 0;
+        constexpr int group_size = 8;
+        constexpr int numRegs = 8;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]);
+    }
+    if (h_numAlignmentsPerPartition[1]){
+        constexpr int partitionId = 1;
+        constexpr int group_size = 8;
+        constexpr int numRegs = 12;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]);
+    }
+    if (h_numAlignmentsPerPartition[2]){
+        constexpr int partitionId = 2;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 8;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]);
+    }
+    if (h_numAlignmentsPerPartition[3]){
+        constexpr int partitionId = 3;
+        constexpr int group_size = 8;
+        constexpr int numRegs = 20;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]);
+    }
+    if (h_numAlignmentsPerPartition[4]){
+        constexpr int partitionId = 4;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 16;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]);
+    }
+    if (h_numAlignmentsPerPartition[5]){
+        constexpr int partitionId = 5;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 20;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]);
+    }
+    if (h_numAlignmentsPerPartition[6]){
+        constexpr int partitionId = 6;
+        constexpr int group_size = 16;
+        constexpr int numRegs = 24;
+        constexpr int blocksize = 32;
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]);
+    }
+    #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
+
+    computeTimer.stop();
+    computeTimer.printGCUPS(dp_cells);
+
+    cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
+
+    for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
+
+    totalTimer.stop();
+    totalTimer.printGCUPS(dp_cells);
+
+    return alignment_scores_float;
+}
+
+
+
+
+
+
+std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default, const Options& options){
+    helpers::CpuTimer totalTimer("processBatch_overlapped_float");
+
+    // pinned_batch fullBatch(fullBatch_default);
+    const auto& fullBatch = fullBatch_default;
+
+    const uint8_t* read_chars       = fullBatch.reads.data(); //batch_2.chars.data();
+    const uint read_bytes = fullBatch.reads.size();
+    const uint8_t* hap_chars       = fullBatch.haps.data(); //batch_2.chars.data();
+    const uint hap_bytes = fullBatch.haps.size();
+    const uint8_t* base_qual       = fullBatch.base_quals.data(); //batch_2.chars.data();
+    const uint8_t* ins_qual       = fullBatch.ins_quals.data(); //batch_2.chars.data();
+    const uint8_t* del_qual       = fullBatch.del_quals.data(); //batch_2.chars.data();
+    const int* offset_reads       = fullBatch.read_offsets.data(); //batch_2.chars.data();
+    const int* offset_haps       = fullBatch.hap_offsets.data(); //batch_2.chars.data();
+    const int* read_len       = fullBatch.readlen.data(); //batch_2.chars.data();
+    const int* hap_len       = fullBatch.haplen.data(); //batch_2.chars.data();
+    const int num_reads = fullBatch.readlen.size(); //batch_2.chars.data();
+    const int num_haps = fullBatch.haplen.size(); //batch_2.chars.data();
+    const int num_batches = fullBatch.batch_reads.size(); //batch_2.chars.data();
+    const int* hap_batches       = fullBatch.batch_haps.data(); //batch_2.chars.data();
+    const int* read_batches       = fullBatch.batch_reads.data(); //batch_2.chars.data();
+    const int* offset_hap_batches       = fullBatch.batch_haps_offsets.data(); //batch_2.chars.data();
+    const int* offset_read_batches       = fullBatch.batch_reads_offsets.data(); //batch_2.chars.data();
+
+    int totalNumberOfAlignments = 0;
+    for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
+
+    std::vector<float> alignment_scores_float(totalNumberOfAlignments);
+    std::cout << "Calculating:  " << totalNumberOfAlignments << " alignments in " << num_batches << " batches \n";
+    std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
+    std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
+
+    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch_default);
+
+    cudaStream_t streams_part[numPartitions];
+    for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
+
+    std::vector<cudaStream_t> transferStreams(2);
+    for(auto& stream : transferStreams){
+        cudaStreamCreate(&stream);
+    }
+
+    thrust::device_vector<float> devAlignmentScoresFloat_vec(totalNumberOfAlignments, 0);
+
+    thrust::device_vector<uint8_t> dev_read_chars_vec(read_bytes);
+    thrust::device_vector<uint8_t> dev_hap_chars_vec(hap_bytes);
+    thrust::device_vector<uint8_t> dev_base_qual_vec(read_bytes);
+    thrust::device_vector<uint8_t> dev_ins_qual_vec(read_bytes);
+    thrust::device_vector<uint8_t> dev_del_qual_vec(read_bytes);
+
+    thrust::device_vector<int> dev_offset_reads_vec(num_reads);
+    thrust::device_vector<int> dev_offset_haps_vec(num_haps);
+    thrust::device_vector<int> dev_read_len_vec(num_reads);
+    thrust::device_vector<int> dev_hap_len_vec(num_haps);
+    thrust::device_vector<int> dev_read_batches_vec(num_batches);
+    thrust::device_vector<int> dev_hap_batches_vec(num_batches);
+    thrust::device_vector<int> dev_offset_read_batches_vec(num_batches);
+    thrust::device_vector<int> dev_offset_hap_batches_vec(num_batches);
+
+    thrust::device_vector<int> d_numIndicesPerPartitionPerBatch(num_batches * numPartitions, 0);
+    thrust::device_vector<int> d_indicesPerPartitionPerBatch(num_reads * numPartitions, -1);
+    thrust::device_vector<int> d_resultOffsetsPerBatch(num_batches);
+    thrust::device_vector<int> d_numAlignmentsPerBatch(num_batches * numPartitions);
+    thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
+    thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
+    std::vector<int, PinnedAllocator<int>> h_numAlignmentsPerPartition(numPartitions);
+
+    // std::vector<thrust::device_vector<uint8_t>> dev_read_chars_vec(read_bytes);
+    // std::vector<thrust::device_vector<uint8_t>> dev_hap_chars_vec(hap_bytes);
+    // std::vector<thrust::device_vector<uint8_t>> dev_base_qual_vec(read_bytes);
+    // std::vector<thrust::device_vector<uint8_t>> dev_ins_qual_vec(read_bytes);
+    // std::vector<thrust::device_vector<uint8_t>> dev_del_qual_vec(read_bytes);
+
+    // std::vector<thrust::device_vector<int>> dev_offset_reads_vec(num_reads);
+    // std::vector<thrust::device_vector<int>> dev_offset_haps_vec(num_haps);
+    // std::vector<thrust::device_vector<int>> dev_read_len_vec(num_reads);
+    // std::vector<thrust::device_vector<int>> dev_hap_len_vec(num_haps);
+    // std::vector<thrust::device_vector<int>> dev_read_batches_vec(num_batches);
+    // std::vector<thrust::device_vector<int>> dev_hap_batches_vec(num_batches);
+    // std::vector<thrust::device_vector<int>> dev_offset_read_batches_vec(num_batches);
+    // std::vector<thrust::device_vector<int>> dev_offset_hap_batches_vec(num_batches);
+
+    // thrust::device_vector<int> d_numIndicesPerPartitionPerBatch(num_batches * numPartitions, 0);
+    // thrust::device_vector<int> d_indicesPerPartitionPerBatch(num_reads * numPartitions, -1);
+    // thrust::device_vector<int> d_resultOffsetsPerBatch(num_batches);
+    // thrust::device_vector<int> d_numAlignmentsPerBatch(num_batches * numPartitions);
+    // thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
+    // thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
+    // std::vector<int, PinnedAllocator<int>> h_numAlignmentsPerPartition(numPartitions);
+
+    // std::vector<thrust::device_vector<uint8_t>> vec_d_read_chars(2);
+    // std::vector<thrust::device_vector<uint8_t>> vec_d_hap_chars(2);
+    // std::vector<thrust::device_vector<uint8_t>> vec_d_base_qual(2);
+    // std::vector<thrust::device_vector<uint8_t>> vec_d_ins_qual(2);
+    // std::vector<thrust::device_vector<uint8_t>> vec_d_del_qual(2);
+
+    // std::vector<thrust::device_vector<int>> vec_d_offset_reads_vec(2);
+    // std::vector<thrust::device_vector<int>> vec_d_offset_haps_vec(2);
+    // std::vector<thrust::device_vector<int>> vec_d_read_len_vec(2);
+    // std::vector<thrust::device_vector<int>> vec_d_hap_len_vec(2);
+
+    // std::vector<thrust::device_vector<int>> vec_d_read_batches_vec(2);
+    // std::vector<thrust::device_vector<int>> vec_d_hap_batches_vec(2);
+    // std::vector<thrust::device_vector<int>> vec_d_offset_read_batches_vec(2);
+    // std::vector<thrust::device_vector<int>> vec_d_offset_hap_batches_vec(2);
+
+    // for(int i = 0; i < 2; i++){
+    //     vec_d_read_chars.emplace_back(64*1024*1024);
+    //     vec_d_hap_chars.emplace_back(64*1024*1024);
+    //     vec_d_base_qual.emplace_back(64*1024*1024);
+    //     vec_d_ins_qual.emplace_back(64*1024*1024);
+    //     vec_d_del_qual.emplace_back(64*1024*1024);
+    //     vec_d_offset_reads_vec.emplace_back(numReads / numTransferChunks);
+    // }
+
+    uint8_t* const dev_read_chars = dev_read_chars_vec.data().get();
+    uint8_t* const dev_hap_chars = dev_hap_chars_vec.data().get();
+    uint8_t* const dev_base_qual = dev_base_qual_vec.data().get();
+    uint8_t* const dev_ins_qual = dev_ins_qual_vec.data().get();
+    uint8_t* const dev_del_qual = dev_del_qual_vec.data().get();
+    int* const dev_offset_reads = dev_offset_reads_vec.data().get();
+    int* const dev_offset_haps = dev_offset_haps_vec.data().get();
+    int* const dev_read_len = dev_read_len_vec.data().get();
+    int* const dev_hap_len = dev_hap_len_vec.data().get();
+    int* const dev_read_batches = dev_read_batches_vec.data().get();
+    int* const dev_hap_batches = dev_hap_batches_vec.data().get();
+    int* const dev_offset_read_batches = dev_offset_read_batches_vec.data().get();
+    int* const dev_offset_hap_batches = dev_offset_hap_batches_vec.data().get();
+    float* const devAlignmentScoresFloat = devAlignmentScoresFloat_vec.data().get();
+
+    int numProcessedAlignmentsByChunks = 0;
+    int numProcessedBatchesByChunks = 0;
+
+    const int numTransferChunks = SDIV(num_batches, options.transferchunksize);
+
+    for(int computeChunk = 0, transferChunk = 0; computeChunk < numTransferChunks; computeChunk++){
+        for(; transferChunk < numTransferChunks && transferChunk < (computeChunk + 2); transferChunk++){
+            nvtx3::scoped_range sr1("transferChunk");
+            cudaStream_t transferStream = transferStreams[transferChunk % 2];
+            
+            const int firstBatchId = transferChunk * options.transferchunksize;
+            const int lastBatchId_excl = std::min((transferChunk+1)* options.transferchunksize, num_batches);
+            const int numBatchesInChunk = lastBatchId_excl - firstBatchId;
+
+            const int firstReadInChunk = offset_read_batches[firstBatchId];
+            const int lastReadInChunk_excl = offset_read_batches[lastBatchId_excl];
+            const int numReadsInChunk = lastReadInChunk_excl - firstReadInChunk;
+
+            const int firstHapInChunk = offset_hap_batches[firstBatchId];
+            const int lastHapInChunk_excl = offset_hap_batches[lastBatchId_excl];
+            const int numHapsInChunk = lastHapInChunk_excl - firstHapInChunk;
+
+            const size_t numReadBytesInChunk = offset_reads[lastReadInChunk_excl] - offset_reads[firstReadInChunk];
+            const size_t numHapBytesInChunk = offset_haps[lastHapInChunk_excl] - offset_haps[firstHapInChunk];
+
+            // std::cout << "transferChunk " << transferChunk << "\n";
+            // std::cout << "firstBatchId " << firstBatchId << "\n";
+            // std::cout << "lastBatchId_excl " << lastBatchId_excl << "\n";
+            // std::cout << "numBatchesInChunk " << numBatchesInChunk << "\n";
+            // std::cout << "firstReadInChunk " << firstReadInChunk << "\n";
+            // std::cout << "lastReadInChunk_excl " << lastReadInChunk_excl << "\n";
+            // std::cout << "numReadsInChunk " << numReadsInChunk << "\n";
+            // std::cout << "firstHapInChunk " << firstHapInChunk << "\n";
+            // std::cout << "lastHapInChunk_excl " << lastHapInChunk_excl << "\n";
+            // std::cout << "numHapsInChunk " << numHapsInChunk << "\n";
+            // std::cout << "numReadBytesInChunk " << numReadBytesInChunk << "\n";
+            // std::cout << "numHapBytesInChunk " << numHapBytesInChunk << "\n";
+            // std::cout << "----------------------------\n";
+
+
+
+            cudaMemcpyAsync(dev_read_chars + offset_reads[firstReadInChunk], read_chars + offset_reads[firstReadInChunk], numReadBytesInChunk, cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_hap_chars + offset_haps[firstHapInChunk], hap_chars + offset_haps[firstHapInChunk], numHapBytesInChunk, cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_base_qual + offset_reads[firstReadInChunk], base_qual + offset_reads[firstReadInChunk], numReadBytesInChunk, cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_ins_qual + offset_reads[firstReadInChunk], ins_qual + offset_reads[firstReadInChunk], numReadBytesInChunk, cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_del_qual + offset_reads[firstReadInChunk], del_qual + offset_reads[firstReadInChunk], numReadBytesInChunk, cudaMemcpyHostToDevice, transferStream); CUERR
+
+            cudaMemcpyAsync(dev_offset_reads + firstReadInChunk, offset_reads + firstReadInChunk, numReadsInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_offset_haps + firstHapInChunk, offset_haps + firstHapInChunk, numHapsInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_read_len + firstReadInChunk, read_len + firstReadInChunk, numReadsInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_hap_len + firstHapInChunk, hap_len + firstHapInChunk, numHapsInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_offset_read_batches + firstBatchId, offset_read_batches + firstBatchId, numBatchesInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_offset_hap_batches + firstBatchId, offset_hap_batches + firstBatchId, numBatchesInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_read_batches + firstBatchId, read_batches + firstBatchId, numBatchesInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+            cudaMemcpyAsync(dev_hap_batches + firstBatchId, hap_batches + firstBatchId, numBatchesInChunk*sizeof(int), cudaMemcpyHostToDevice, transferStream); CUERR
+        }
+        nvtx3::scoped_range sr2("computeChunk");
+        cudaStream_t mainStream = transferStreams[computeChunk % 2];
+        const int firstBatchId = computeChunk * options.transferchunksize;
+        const int lastBatchId_excl = std::min((computeChunk+1)* options.transferchunksize, num_batches);
+        const int numBatchesInChunk = lastBatchId_excl - firstBatchId;
+
+        const int firstReadInChunk = offset_read_batches[firstBatchId];
+        const int lastReadInChunk_excl = offset_read_batches[lastBatchId_excl];
+        const int numReadsInChunk = lastReadInChunk_excl - firstReadInChunk;
+
+        const int firstHapInChunk = offset_hap_batches[firstBatchId];
+        const int lastHapInChunk_excl = offset_hap_batches[lastBatchId_excl];
+        const int numHapsInChunk = lastHapInChunk_excl - firstHapInChunk;
+
+        const size_t numReadBytesInChunk = offset_reads[lastReadInChunk_excl] - offset_reads[firstReadInChunk];
+        const size_t numHapBytesInChunk = offset_haps[lastHapInChunk_excl] - offset_haps[firstHapInChunk];
+
+        convert_DNA<<<numReadsInChunk, 128, 0, mainStream>>>(dev_read_chars + offset_reads[firstReadInChunk], numReadBytesInChunk);
+        convert_DNA<<<numHapsInChunk, 128, 0, mainStream>>>(dev_hap_chars + offset_haps[firstHapInChunk], numHapBytesInChunk);
+
+        //ensure buffers used by previous batch are no longer in use
+        for(int i = 0; i < numPartitions; i++){
+            cudaStreamSynchronize(streams_part[i]);
+        }
+
+        cudaMemsetAsync(d_numIndicesPerPartitionPerBatch.data().get(), 0, sizeof(int) * numPartitions * numBatchesInChunk, mainStream); CUERR;
+        partitionIndicesKernel<<<numBatchesInChunk, 128, 0, mainStream>>>(
+            d_numIndicesPerPartitionPerBatch.data().get(),
+            d_indicesPerPartitionPerBatch.data().get(),
+            dev_read_len,
+            dev_read_batches + firstBatchId,
+            dev_offset_read_batches + firstBatchId,
+            numBatchesInChunk,
+            numReadsInChunk
+        );
+        CUERR;
+
+        #if 0
+            thrust::host_vector<int> h_numIndicesPerPartitionPerBatch = d_numIndicesPerPartitionPerBatch;
+            thrust::host_vector<int> h_indicesPerPartitionPerBatch = d_indicesPerPartitionPerBatch;
+
+            for(int p = 0; p < numPartitions; p++){
+                if(p <= 4){
+                    std::cout << "Partition p = " << p << "\n";
+                    std::cout << "numIndicesPerBatch: ";
+                    for(int b = 0; b < numBatchesInChunk; b++){
+                        std::cout << h_numIndicesPerPartitionPerBatch[p * numBatchesInChunk + b] << ", ";
+                    }
+                    std::cout << "\n";
+
+                    std::cout << "indicesPerBatch: ";
+                    for(int b = 0; b < numBatchesInChunk; b++){
+                        const int num = h_numIndicesPerPartitionPerBatch[p * numBatchesInChunk + b];
+                        for(int i = 0; i < num; i++){
+                            const int outputOffset = offset_read_batches[firstBatchId + b] - offset_read_batches[firstBatchId];
+                            std::cout << h_indicesPerPartitionPerBatch[p * numReadsInChunk + outputOffset + i];
+                            if(i != num-1){
+                                std::cout << ", ";
+                            }
+                        }
+                        std::cout << " | ";
+                    }
+                    std::cout << "\n";
+                }
+            }
+        #endif
+    
+        thrust::transform(
+            thrust::cuda::par_nosync.on(mainStream),
+            dev_read_batches + firstBatchId,
+            dev_read_batches + firstBatchId + numBatchesInChunk,
+            dev_hap_batches + firstBatchId,
+            d_resultOffsetsPerBatch.begin(),
+            thrust::multiplies<int>{}
+        );
+        thrust::exclusive_scan(
+            thrust::cuda::par_nosync(ThrustCudaMallocAsyncAllocator<int>(mainStream)).on(mainStream),
+            d_resultOffsetsPerBatch.begin(),
+            d_resultOffsetsPerBatch.begin() + numBatchesInChunk,
+            d_resultOffsetsPerBatch.begin()
+        );
+
+        // thrust::host_vector<int> h_resultOffsetsPerBatch = d_resultOffsetsPerBatch;
+        // std::cout << "h_resultOffsetsPerBatch. numBatchesInChunk " << numBatchesInChunk << "\n";
+        // for(auto& x : h_resultOffsetsPerBatch){
+        //     std::cout << x << " ";
+        // }
+        // std::cout << "\n";
+
+        {     
+            int* d_numAlignmentsPerPartitionPerBatch = d_numAlignmentsPerBatchInclPrefixSum.data().get(); // reuse
+            const int* d_numHaplotypesPerBatch = dev_hap_batches;
+            computeAlignmentsPerPartitionPerBatch<<<dim3(SDIV(numBatchesInChunk, 128), numPartitions), 128,0, mainStream>>>(
+                d_numAlignmentsPerPartitionPerBatch,
+                d_numIndicesPerPartitionPerBatch.data().get(),
+                d_numHaplotypesPerBatch + firstBatchId,
+                numPartitions, 
+                numBatchesInChunk
+            ); CUERR;
+    
+            auto offsets = thrust::make_transform_iterator(
+                thrust::make_counting_iterator(0),
+                [numBatchesInChunk] __host__ __device__(int partition){
+                    return partition * numBatchesInChunk;
+                }
+            );
+            size_t temp_storage_bytes = 0;
+            cub::DeviceSegmentedReduce::Sum(nullptr, temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
+                d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, mainStream); CUERR;
+            thrust::device_vector<char, ThrustCudaMallocAsyncAllocator<char>> d_temp(temp_storage_bytes, ThrustCudaMallocAsyncAllocator<char>(mainStream));
+            cub::DeviceSegmentedReduce::Sum(d_temp.data().get(), temp_storage_bytes, d_numAlignmentsPerPartitionPerBatch, 
+                d_numAlignmentsPerPartition.data().get(), numPartitions, offsets, offsets + 1, mainStream); CUERR;
+        }
+
+        cudaMemcpyAsync(h_numAlignmentsPerPartition.data(), d_numAlignmentsPerPartition.data().get(), sizeof(int) * numPartitions, cudaMemcpyDeviceToHost, mainStream); CUERR;
+        cudaStreamSynchronize(mainStream); CUERR;
+
+        // std::cout << "h_numAlignmentsPerPartition: ";
+        // for(int i = 0; i< numPartitions; i++){
+        //     std::cout << h_numAlignmentsPerPartition[i] << ", ";
+        // }
+        // std::cout << "\n";
+
+        // thrust::host_vector<int> h_offset_read_batches_vec = dev_offset_read_batches_vec;
+        // for(auto& x : h_offset_read_batches_vec){
+        //     std::cout << x << " ";
+        // }
+        // std::cout << "\n";
+
+        int numProcessedAlignmentsByCurrentChunk = 0;
+
+        #define COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(stream) \
+            nvtx3::scoped_range sr3("partition"); \
+            constexpr int groupsPerBlock = blocksize / group_size; \
+            const int numAlignmentsInPartition = h_numAlignmentsPerPartition[partitionId]; \
+            const int numBlocks = SDIV(numAlignmentsInPartition, groupsPerBlock); \
+            const int* d_numIndicesPerBatch = d_numIndicesPerPartitionPerBatch.data().get() + partitionId*numBatchesInChunk; \
+            thrust::transform( \
+                thrust::cuda::par_nosync.on(stream), \
+                d_numIndicesPerBatch, \
+                d_numIndicesPerBatch + numBatchesInChunk, \
+                dev_hap_batches + numProcessedBatchesByChunks, \
+                d_numAlignmentsPerBatch.begin() + partitionId * numBatchesInChunk, \
+                thrust::multiplies<int>{} \
+            ); \
+            thrust::inclusive_scan( \
+                thrust::cuda::par_nosync(ThrustCudaMallocAsyncAllocator<int>(stream)).on(stream), \
+                d_numAlignmentsPerBatch.begin() + partitionId * numBatchesInChunk, \
+                d_numAlignmentsPerBatch.begin() + partitionId * numBatchesInChunk+ numBatchesInChunk, \
+                d_numAlignmentsPerBatchInclPrefixSum.begin() + partitionId * numBatchesInChunk \
+            );  \
+            PairHMM_align_partition_float_allowMultipleBatchesPerWarp<group_size,numRegs><<<numBlocks, blocksize,0,stream>>>( \
+                dev_read_chars,  \
+                dev_hap_chars,  \
+                dev_base_qual,  \
+                dev_ins_qual,  \
+                dev_del_qual,  \
+                devAlignmentScoresFloat + numProcessedAlignmentsByChunks,  \
+                dev_offset_reads + firstReadInChunk,  \
+                dev_offset_haps + firstHapInChunk,  \
+                dev_read_len + firstReadInChunk,  \
+                dev_hap_len + firstHapInChunk, \
+                dev_read_batches + firstBatchId, \
+                dev_hap_batches + firstBatchId,  \
+                dev_offset_hap_batches + firstBatchId,  \
+                d_numIndicesPerBatch,  \
+                d_indicesPerPartitionPerBatch.data().get() + partitionId * numReadsInChunk,  \
+                dev_offset_read_batches + firstBatchId,   \
+                numBatchesInChunk,  \
+                d_resultOffsetsPerBatch.data().get(),  \
+                d_numAlignmentsPerBatch.data().get() + partitionId * numBatchesInChunk,  \
+                d_numAlignmentsPerBatchInclPrefixSum.data().get() + partitionId * numBatchesInChunk,  \
+                numAlignmentsInPartition \
+            ); CUERR; \
+            numProcessedAlignmentsByCurrentChunk += numAlignmentsInPartition;
+
+
+        if (h_numAlignmentsPerPartition[0]){
+            constexpr int partitionId = 0;
+            constexpr int group_size = 8;
+            constexpr int numRegs = 8;
+            constexpr int blocksize = 32;
+            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]);
+        }
+        if (h_numAlignmentsPerPartition[1]){
+            constexpr int partitionId = 1;
+            constexpr int group_size = 8;
+            constexpr int numRegs = 12;
+            constexpr int blocksize = 32;
+            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]);
+        }
+        if (h_numAlignmentsPerPartition[2]){
+            constexpr int partitionId = 2;
+            constexpr int group_size = 16;
+            constexpr int numRegs = 8;
+            constexpr int blocksize = 32;
+            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]);
+        }
+        if (h_numAlignmentsPerPartition[3]){
+            constexpr int partitionId = 3;
+            constexpr int group_size = 8;
+            constexpr int numRegs = 20;
+            constexpr int blocksize = 32;
+            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]);
+        }
+        if (h_numAlignmentsPerPartition[4]){
+            constexpr int partitionId = 4;
+            constexpr int group_size = 16;
+            constexpr int numRegs = 16;
+            constexpr int blocksize = 32;
+            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]);
+        }
+        if (h_numAlignmentsPerPartition[5]){
+            constexpr int partitionId = 5;
+            constexpr int group_size = 16;
+            constexpr int numRegs = 20;
+            constexpr int blocksize = 32;
+            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]);
+        }
+        if (h_numAlignmentsPerPartition[6]){
+            constexpr int partitionId = 6;
+            constexpr int group_size = 16;
+            constexpr int numRegs = 24;
+            constexpr int blocksize = 32;
+            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]);
+        }
+
+        numProcessedAlignmentsByChunks += numProcessedAlignmentsByCurrentChunk;
+        numProcessedBatchesByChunks += numBatchesInChunk;
+
+        // for(int i = 0; i < numPartitions; i++){
+        //     cudaStreamSynchronize(streams_part[i]);
+        // }
+
+            
+    }
+    #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
+
+    
+    cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
+
+    for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
+    for(auto& stream : transferStreams){
+        cudaStreamDestroy(stream);
+    }
+
+    totalTimer.stop();
+    totalTimer.printGCUPS(dp_cells);
+
+    return alignment_scores_float;
+}
+
+
+
+
+
 
 int main(const int argc, char const * const argv[])
 {
@@ -3207,6 +4297,9 @@ int main(const int argc, char const * const argv[])
     
     std::vector<float> resultsBatchOverlapped = processBatch_overlapped(fullBatch, options);
 
+    std::vector<float> resultsBatchAsWhole_float = processBatchAsWhole_float(fullBatch, options);    
+    std::vector<float> resultsBatchOverlapped_float = processBatch_overlapped_float(fullBatch, options);
+
     int numErrors = 0;
     for(int i = 0; i < int(resultsBatchAsWhole.size()); i++){
         if(resultsBatchAsWhole[i] != resultsBatchOverlapped[i]){
@@ -3236,11 +4329,23 @@ int main(const int argc, char const * const argv[])
                 numErrors++;
             }
         }
-        std::cout << "Comparison with cpu results finished. diff limit " << limit << ". errors: " << numErrors << "\n";
+        std::cout << "half Comparison with cpu results finished. diff limit " << limit << ". errors: " << numErrors << "\n";
 
         // for(int i = 0; i < int(resultsBatchAsWhole.size()); i++){
         //     std::cout << "i " << i << " : " << resultsCPU[i] << " " << resultsBatchAsWhole[i] << " " <<  resultsBatchOverlapped[i] << "\n";
         // }
+
+        numErrors = 0;
+        for(int i = 0; i < int(resultsBatchOverlapped_float.size()); i++){
+            if(std::abs(resultsCPU[i] - resultsBatchOverlapped_float[i]) > limit){
+                if(numErrors < 5){
+                    std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped_float[i] << "\n";
+                    std::cout << std::abs(resultsCPU[i] - resultsBatchOverlapped_float[i]) << "\n";
+                }
+                numErrors++;
+            }
+        }
+        std::cout << "float Comparison with cpu results finished. diff limit " << limit << ". errors: " << numErrors << "\n";
     }
 
     // int res_off = 0;
