@@ -78,8 +78,8 @@ namespace helpers {
 
         void printGCUPS(double cells){
             double gcups = cells / 1000. / 1000. / 1000.;
-            gcups = gcups / (elapsed() / 1000);
-             os << "# elapsed time ("<< name <<"): " << elapsed() << "s " << gcups << " GCUPS (" << name << ")\n";
+            gcups = gcups / (elapsed());
+            os << "TIMING: " << elapsed() << " s " << gcups << " GCUPS (" << name << ")\n";
         }
 
         void print_throughput(std::size_t bytes, int num){

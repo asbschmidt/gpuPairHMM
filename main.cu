@@ -95,7 +95,7 @@ constexpr int numPartitions = PartitionLimits::numPartitions();
 struct Options{
     std::string inputfile = "";
     std::string outputfile = "";
-    int transferchunksize = 50000;
+    int transferchunksize = 100000;
     bool checkResults = false;
     int checkResultsDecimalDigits = 3;
 };
@@ -1829,6 +1829,27 @@ struct pinned_batch{
 };
 
 
+std::int64_t computeNumberOfDPCells(const batch& batch){
+    const int numBatches = batch.batch_haps.size();
+
+    std::int64_t result = 0;
+
+    for (int i=0; i<numBatches; i++) {
+        const int numReadsInBatch = batch.batch_reads[i];
+        const int numHapsInBatch = batch.batch_haps[i];
+        for (int k=0; k < numReadsInBatch; k++){
+            int read = batch.batch_reads_offsets[i]+k;
+            int read_len = batch.readlen[read];
+            for (int j=0; j < numHapsInBatch; j++){
+                int hap = batch.batch_haps_offsets[i]+j;
+                int hap_len = batch.haplen[hap];
+                result += read_len * hap_len;
+            }
+        }
+    }
+
+    return result;
+}
 
 
 void generate_batch_offsets(batch& batch_){
@@ -2204,8 +2225,8 @@ void align_all_host (batch& batch_,std::vector<float>& ph2pr){
 }
 
 std::vector<float> processBatchCPU(const batch& batch_, const std::vector<float>& ph2pr){
-    size_t dp_cells = 0; //for timing macro
-    TIMERSTART_CUDA(processBatchCPU);
+    helpers::CpuTimer totalTimer("processBatchCPU");
+    const uint64_t dp_cells = computeNumberOfDPCells(batch_);
 
     const int numBatches = batch_.batch_haps.size();
 
@@ -2250,16 +2271,16 @@ std::vector<float> processBatchCPU(const batch& batch_, const std::vector<float>
         }
     }
 
-
-    TIMERSTOP_CUDA(processBatchCPU);
+    totalTimer.stop();
+    totalTimer.printGCUPS(dp_cells);
 
     return results;
 }
 
 
 std::vector<float> processBatchCPUFaster(const batch& batch_, const std::vector<float>& ph2pr){
-    size_t dp_cells = 0; //for timing macro
-    TIMERSTART_CUDA(processBatchCPUFaster);
+    helpers::CpuTimer totalTimer("processBatchCPUFaster");
+    const uint64_t dp_cells = computeNumberOfDPCells(batch_);
 
     const int numBatches = batch_.batch_haps.size();
 
@@ -2312,15 +2333,15 @@ std::vector<float> processBatchCPUFaster(const batch& batch_, const std::vector<
         results[outputIndex] = score;
     }
 
-
-    TIMERSTOP_CUDA(processBatchCPUFaster);
+    totalTimer.stop();
+    totalTimer.printGCUPS(dp_cells);
 
     return results;
 }
 
 
 std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*options*/){
-    TIMERSTART_CUDA(processBatchAsWhole);
+    helpers::CpuTimer totalTimer("processBatchAsWhole");
 
     const uint8_t* read_chars       = fullBatch.reads.data(); //batch_2.chars.data();
     const uint read_bytes = fullBatch.reads.size();
@@ -2350,57 +2371,8 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
 
 
-    //determine max lengths in each batch_hatch
+    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch);
 
-    std::vector<int> max_read_len(num_batches);
-    std::vector<int> max_hap_len(num_batches);
-    std::vector<int> avg_read_len(num_batches);
-    std::vector<int> avg_hap_len(num_batches);
-
-    uint64_t dp_cells = 0;
-    //uint64_t dp_cells_avg = 0;
-    uint64_t dp_cells_max = 0;
-    for (int i=0; i<num_batches; i++) {
-        max_read_len[i] = avg_read_len[i] = 0;
-
-        for (int k=0; k<read_batches[i]; k++) {
-            int read = offset_read_batches[i]+k;
-            int rl= read_len[read];
-            if (rl > max_read_len[i]) max_read_len[i] = rl;
-            avg_read_len[i] += rl;
-        }
-        //std::cout << "Batch: " << i << " after first loop \n";
-        avg_read_len[i] = avg_read_len[i] / read_batches[i];
-        max_hap_len[i] = avg_hap_len[i] = 0;
-
-        for (int k=0; k<hap_batches[i]; k++) {
-            int hap = offset_hap_batches[i]+k;
-            int hl = hap_len[hap];
-            if (hl > max_hap_len[i]) max_hap_len[i] = hl;
-            avg_hap_len[i] += hl;
-        }
-        //std::cout << "Batch: " << i << " after second loop \n";
-        avg_hap_len[i] = avg_hap_len[i] / hap_batches[i];
-        //for (int k=0; k<read_batches[i]; k++)
-        //    for (int j=0; j<hap_batches[i]; j++)
-        //       dp_cells += max_read_len[i] * max_hap_len[i]; // [offset_read_batches[i]+k] * hap_len[offset_hap_batches[i]+j];
-        uint64_t temp_dp = read_batches[i] * hap_batches[i];
-        dp_cells_max += temp_dp * max_read_len[i] * avg_hap_len[i];
-        dp_cells += temp_dp * avg_read_len[i] * avg_hap_len[i];
-        //std::cout << "Batch: " << i << " #Reads: " << read_batches[i] << " Max_rl: " << max_read_len[i] << " Avg_rl: " << avg_read_len[i] << " #Haps: " << hap_batches[i] << " Max_hl: " << max_hap_len[i] << " avg_hl: " << avg_hap_len[i] << "\n";
-
-    }
-    int overall_max_rl = 0;
-    int overall_max_hl = 0;
-    for (int i=0; i<num_batches; i++) {
-        //std::cout << "Batch: " << i << " #Reads: " << read_batches[i] << " Max_rl: " << max_read_len[i] << " Avg_rl: " << avg_read_len[i] << " #Haps: " << hap_batches[i] << " Max_hl: " << max_hap_len[i] << " avg_hl: " << avg_hap_len[i] << "\n";
-        if (overall_max_rl < max_read_len[i]) overall_max_rl = max_read_len[i];
-        if (overall_max_hl < max_hap_len[i]) overall_max_hl = max_hap_len[i];
-    }
-    std::cout << "dp_cells: " << dp_cells << " dp_cells_max: " << dp_cells_max << " Max_read_len: " << overall_max_rl << " max_hap_len: " << overall_max_hl << "\n";
-
-
-    std::cout << "numPartitions: " << numPartitions << "\n";
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
 
@@ -2436,7 +2408,7 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     float* const devAlignmentScoresFloat = devAlignmentScoresFloat_vec.data().get();
 
 
-    TIMERSTART_CUDA(DATA_TRANSFER)
+    helpers::CpuTimer transfertimer("DATA_TRANSFER");
     cudaMemcpy(dev_read_chars, read_chars, read_bytes, cudaMemcpyHostToDevice); CUERR
     cudaMemcpy(dev_hap_chars, hap_chars, hap_bytes, cudaMemcpyHostToDevice); CUERR
     cudaMemcpy(dev_base_qual, base_qual, read_bytes, cudaMemcpyHostToDevice); CUERR
@@ -2450,7 +2422,7 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     cudaMemcpy(dev_offset_hap_batches, offset_hap_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
     cudaMemcpy(dev_read_batches, read_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
     cudaMemcpy(dev_hap_batches, hap_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
-    TIMERSTOP_CUDA(DATA_TRANSFER)
+    transfertimer.print();
 
     //print_batch(fullBatch); // prints first reads/qualities and haplotype per batch.
 
@@ -2562,7 +2534,8 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     std::cout << "\n";
 
     cudaMemset(devAlignmentScoresFloat, 0, totalNumberOfAlignments * sizeof(float)); CUERR;
-    TIMERSTART_CUDA(PAIR_HMM_PARTITIONED_COMBINED)
+    helpers::GpuTimer computeTimer("PAIR_HMM_PARTITIONED_COMBINED");
+
     #define COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(stream) \
         constexpr int groupsPerBlock = blocksize / group_size; \
         const int numAlignmentsInPartition = h_numAlignmentsPerPartition[partitionId]; \
@@ -2638,12 +2611,15 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     }
     #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
 
-    TIMERSTOP_CUDA(PAIR_HMM_PARTITIONED_COMBINED)
+    computeTimer.stop();
+    computeTimer.printGCUPS(dp_cells);
+
     cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
 
     for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
 
-    TIMERSTOP_CUDA(processBatchAsWhole);
+    totalTimer.stop();
+    totalTimer.printGCUPS(dp_cells);
 
     return alignment_scores_float;
 }
@@ -2654,7 +2630,7 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
 
 
 std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const Options& options){
-    TIMERSTART_CUDA(processBatch_overlapped);
+    helpers::CpuTimer totalTimer("processBatch_overlapped");
 
     // pinned_batch fullBatch(fullBatch_default);
     const auto& fullBatch = fullBatch_default;
@@ -2686,58 +2662,8 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
     std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
     std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
 
+    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch_default);
 
-    //determine max lengths in each batch_hatch
-
-    std::vector<int> max_read_len(num_batches);
-    std::vector<int> max_hap_len(num_batches);
-    std::vector<int> avg_read_len(num_batches);
-    std::vector<int> avg_hap_len(num_batches);
-
-    uint64_t dp_cells = 0;
-    //uint64_t dp_cells_avg = 0;
-    uint64_t dp_cells_max = 0;
-    for (int i=0; i<num_batches; i++) {
-        max_read_len[i] = avg_read_len[i] = 0;
-
-        for (int k=0; k<read_batches[i]; k++) {
-            int read = offset_read_batches[i]+k;
-            int rl= read_len[read];
-            if (rl > max_read_len[i]) max_read_len[i] = rl;
-            avg_read_len[i] += rl;
-        }
-        //std::cout << "Batch: " << i << " after first loop \n";
-        avg_read_len[i] = avg_read_len[i] / read_batches[i];
-        max_hap_len[i] = avg_hap_len[i] = 0;
-
-        for (int k=0; k<hap_batches[i]; k++) {
-            int hap = offset_hap_batches[i]+k;
-            int hl = hap_len[hap];
-            if (hl > max_hap_len[i]) max_hap_len[i] = hl;
-            avg_hap_len[i] += hl;
-        }
-        //std::cout << "Batch: " << i << " after second loop \n";
-        avg_hap_len[i] = avg_hap_len[i] / hap_batches[i];
-        //for (int k=0; k<read_batches[i]; k++)
-        //    for (int j=0; j<hap_batches[i]; j++)
-        //       dp_cells += max_read_len[i] * max_hap_len[i]; // [offset_read_batches[i]+k] * hap_len[offset_hap_batches[i]+j];
-        uint64_t temp_dp = read_batches[i] * hap_batches[i];
-        dp_cells_max += temp_dp * max_read_len[i] * avg_hap_len[i];
-        dp_cells += temp_dp * avg_read_len[i] * avg_hap_len[i];
-        //std::cout << "Batch: " << i << " #Reads: " << read_batches[i] << " Max_rl: " << max_read_len[i] << " Avg_rl: " << avg_read_len[i] << " #Haps: " << hap_batches[i] << " Max_hl: " << max_hap_len[i] << " avg_hl: " << avg_hap_len[i] << "\n";
-
-    }
-    int overall_max_rl = 0;
-    int overall_max_hl = 0;
-    for (int i=0; i<num_batches; i++) {
-        //std::cout << "Batch: " << i << " #Reads: " << read_batches[i] << " Max_rl: " << max_read_len[i] << " Avg_rl: " << avg_read_len[i] << " #Haps: " << hap_batches[i] << " Max_hl: " << max_hap_len[i] << " avg_hl: " << avg_hap_len[i] << "\n";
-        if (overall_max_rl < max_read_len[i]) overall_max_rl = max_read_len[i];
-        if (overall_max_hl < max_hap_len[i]) overall_max_hl = max_hap_len[i];
-    }
-    std::cout << "dp_cells: " << dp_cells << " dp_cells_max: " << dp_cells_max << " Max_read_len: " << overall_max_rl << " max_hap_len: " << overall_max_hl << "\n";
-
-
-    std::cout << "numPartitions: " << numPartitions << "\n";
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
 
@@ -2746,7 +2672,6 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
         cudaStreamCreate(&stream);
     }
 
-    std::cout << "totalNumberOfAlignments " << totalNumberOfAlignments << "\n";
     thrust::device_vector<float> devAlignmentScoresFloat_vec(totalNumberOfAlignments, 0);
 
     thrust::device_vector<uint8_t> dev_read_chars_vec(read_bytes);
@@ -3022,7 +2947,6 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
 
         int numProcessedAlignmentsByCurrentChunk = 0;
 
-        // TIMERSTART_CUDA_STREAM(PAIR_HMM_PARTITIONED_COMBINED, mainStream)
         #define COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(stream) \
             nvtx3::scoped_range sr3("partition"); \
             constexpr int groupsPerBlock = blocksize / group_size; \
@@ -3125,12 +3049,11 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
         // for(int i = 0; i < numPartitions; i++){
         //     cudaStreamSynchronize(streams_part[i]);
         // }
-        // TIMERSTOP_CUDA_STREAM(PAIR_HMM_PARTITIONED_COMBINED, mainStream);
+
             
     }
     #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
 
-    // TIMERSTOP_CUDA(PAIR_HMM_PARTITIONED_COMBINED_ALLCHUNKS);
     
     cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
 
@@ -3139,7 +3062,8 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
         cudaStreamDestroy(stream);
     }
 
-    TIMERSTOP_CUDA(processBatch_overlapped);
+    totalTimer.stop();
+    totalTimer.printGCUPS(dp_cells);
 
     return alignment_scores_float;
 }
