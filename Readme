@@ -1,0 +1,3 @@
+Build with `make`
+
+Run with `./align inputfile` , or `./align inputfile --checkResults` . `--checkResults` will additionally recompute all alignments on the cpu and compare them to the gpu results.
