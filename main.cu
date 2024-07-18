@@ -3227,7 +3227,12 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     std::cout << "\n";
 
     cudaMemset(devAlignmentScoresFloat, 0, totalNumberOfAlignments * sizeof(float)); CUERR;
-    helpers::GpuTimer computeTimer("PAIR_HMM_PARTITIONED_COMBINED");
+    helpers::GpuTimer computeTimer("pairhmm half kernels, total");
+    std::vector<std::unique_ptr<helpers::GpuTimer>> perKernelTimers(numPartitions);
+    for(int p = 0; p < numPartitions; p++){
+        std::string name = "pairhmm half kernel, partition " + std::to_string(p);
+        perKernelTimers[p] = std::make_unique<helpers::GpuTimer>(streams_part[p], name);
+    }
 
     #define COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(stream) \
         constexpr int groupsPerBlock = blocksize / group_size; \
@@ -3248,9 +3253,11 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
             d_numAlignmentsPerBatch.begin() + partitionId * num_batches+ num_batches, \
             d_numAlignmentsPerBatchInclPrefixSum.begin() + partitionId * num_batches \
         );  \
+        perKernelTimers[partitionId]->start(); \
         PairHMM_align_partition_half_allowMultipleBatchesPerWarp<group_size,numRegs><<<numBlocks, blocksize,0,stream>>>(dev_read_chars, dev_hap_chars, dev_base_qual, dev_ins_qual, dev_del_qual, devAlignmentScoresFloat, dev_offset_reads, dev_offset_haps, dev_read_len, dev_hap_len, dev_read_batches, dev_hap_batches, dev_offset_hap_batches,  \
             d_numIndicesPerBatch, d_indicesPerPartitionPerBatch.data().get() + partitionId*num_reads,  \
             dev_offset_read_batches,  num_batches, d_resultOffsetsPerBatch.data().get(), d_numAlignmentsPerBatch.data().get() + partitionId * num_batches, d_numAlignmentsPerBatchInclPrefixSum.data().get() + partitionId * num_batches, numAlignmentsInPartition); \
+        perKernelTimers[partitionId]->stop(); \
 
 
     LAUNCH_ALL_KERNELS
@@ -3258,9 +3265,19 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
 
     computeTimer.stop();
+
+    for(int p = 0; p < numPartitions; p++){
+        if(h_numAlignmentsPerPartition[p] > 0){
+            //don't know the number of dp cells for each kernel, so just print runtime
+            perKernelTimers[p]->print();
+        }
+    }
+
     computeTimer.printGCUPS(dp_cells);
 
     cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
+
+    perKernelTimers.clear();
 
     for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
 
@@ -3811,7 +3828,12 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
     std::cout << "\n";
 
     cudaMemset(devAlignmentScoresFloat, 0, totalNumberOfAlignments * sizeof(float)); CUERR;
-    helpers::GpuTimer computeTimer("PAIR_HMM_PARTITIONED_COMBINED");
+    helpers::GpuTimer computeTimer("pairhmm float kernels, total");
+    std::vector<std::unique_ptr<helpers::GpuTimer>> perKernelTimers(numPartitions);
+    for(int p = 0; p < numPartitions; p++){
+        std::string name = "pairhmm float kernel, partition " + std::to_string(p);
+        perKernelTimers[p] = std::make_unique<helpers::GpuTimer>(streams_part[p], name);
+    }
 
     #define COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(stream) \
         constexpr int groupsPerBlock = blocksize / group_size; \
@@ -3832,9 +3854,11 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
             d_numAlignmentsPerBatch.begin() + partitionId * num_batches+ num_batches, \
             d_numAlignmentsPerBatchInclPrefixSum.begin() + partitionId * num_batches \
         );  \
+        perKernelTimers[partitionId]->start(); \
         PairHMM_align_partition_float_allowMultipleBatchesPerWarp<group_size,numRegs><<<numBlocks, blocksize,0,stream>>>(dev_read_chars, dev_hap_chars, dev_base_qual, dev_ins_qual, dev_del_qual, devAlignmentScoresFloat, dev_offset_reads, dev_offset_haps, dev_read_len, dev_hap_len, dev_read_batches, dev_hap_batches, dev_offset_hap_batches,  \
             d_numIndicesPerBatch, d_indicesPerPartitionPerBatch.data().get() + partitionId*num_reads,  \
             dev_offset_read_batches,  num_batches, d_resultOffsetsPerBatch.data().get(), d_numAlignmentsPerBatch.data().get() + partitionId * num_batches, d_numAlignmentsPerBatchInclPrefixSum.data().get() + partitionId * num_batches, numAlignmentsInPartition); \
+        perKernelTimers[partitionId]->stop(); \
 
 
     LAUNCH_ALL_KERNELS
@@ -3842,9 +3866,18 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
     #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
 
     computeTimer.stop();
+
+    for(int p = 0; p < numPartitions; p++){
+        if(h_numAlignmentsPerPartition[p] > 0){
+            //don't know the number of dp cells for each kernel, so just print runtime
+            perKernelTimers[p]->print();
+        }
+    }
     computeTimer.printGCUPS(dp_cells);
 
     cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
+
+    perKernelTimers.clear();
 
     for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
 
