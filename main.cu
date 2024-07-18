@@ -6,6 +6,7 @@
 #include <cmath>
 #include <vector>
 #include <optional>
+#include <numeric>
 
 #include <algorithm>
 #include <iterator>
@@ -2560,6 +2561,59 @@ std::int64_t computeNumberOfDPCells(const batch& batch){
 }
 
 
+
+std::vector<std::int64_t> computeNumberOfDPCellsPerPartition(const batch& batch){
+    PartitionLimits partitionLimits;
+    std::vector<std::int64_t> dpCellsPerPartition(numPartitions, 0);
+
+    auto getPartitionId = [&](int length){
+        int id = -1;
+        for(int i = 0; i < numPartitions; i++){
+            if(length <= partitionLimits.boundaries[i]){
+                id = i;
+                break;
+            }
+        }
+        assert(id != -1);
+        return id;
+    };
+
+    const int numBatches = batch.batch_haps.size();
+
+    for (int i=0; i<numBatches; i++) {
+        const int numReadsInBatch = batch.batch_reads[i];
+        const int numHapsInBatch = batch.batch_haps[i];
+        for (int k=0; k < numReadsInBatch; k++){
+            int read = batch.batch_reads_offsets[i]+k;
+            int read_len = batch.readlen[read];
+            const int p = getPartitionId(read_len);
+            for (int j=0; j < numHapsInBatch; j++){
+                int hap = batch.batch_haps_offsets[i]+j;
+                int hap_len = batch.haplen[hap];
+                dpCellsPerPartition[p] += read_len * hap_len;
+            }
+        }
+    }
+
+    return dpCellsPerPartition;
+}
+
+
+struct CountsOfDPCells{
+    std::int64_t totalDPCells = 0;
+    std::vector<std::int64_t> dpCellsPerPartition{};
+};
+
+CountsOfDPCells countDPCellsInBatch(const batch& batch){
+    CountsOfDPCells result;
+    result.dpCellsPerPartition = computeNumberOfDPCellsPerPartition(batch);
+    result.totalDPCells = std::reduce(result.dpCellsPerPartition.begin(), result.dpCellsPerPartition.end(), std::int64_t(0));
+    return result;
+}
+
+
+
+
 void generate_batch_offsets(batch& batch_){
 
     int num_batches = batch_.batch_reads.size();
@@ -3037,7 +3091,11 @@ std::vector<float> processBatchCPUFaster(const batch& batch_, const std::vector<
 }
 
 
-std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*options*/){
+std::vector<float> processBatchAsWhole(
+    const batch& fullBatch, 
+    const Options& /*options*/, 
+    const CountsOfDPCells& countsOfDPCells
+){
     helpers::CpuTimer totalTimer("processBatchAsWhole");
 
     const uint8_t* read_chars       = fullBatch.reads.data(); //batch_2.chars.data();
@@ -3059,12 +3117,9 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     const int* offset_hap_batches       = fullBatch.batch_haps_offsets.data(); //batch_2.chars.data();
     const int* offset_read_batches       = fullBatch.batch_reads_offsets.data(); //batch_2.chars.data();
 
-    int totalNumberOfAlignments = 0;
-    for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
+    const int totalNumberOfAlignments = fullBatch.getTotalNumberOfAlignments();
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-
-    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch);
 
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
@@ -3268,12 +3323,11 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
 
     for(int p = 0; p < numPartitions; p++){
         if(h_numAlignmentsPerPartition[p] > 0){
-            //don't know the number of dp cells for each kernel, so just print runtime
-            perKernelTimers[p]->print();
+            perKernelTimers[p]->printGCUPS(countsOfDPCells.dpCellsPerPartition[p]);
         }
     }
 
-    computeTimer.printGCUPS(dp_cells);
+    computeTimer.printGCUPS(countsOfDPCells.totalDPCells);
 
     cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
 
@@ -3282,7 +3336,7 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
 
     totalTimer.stop();
-    totalTimer.printGCUPS(dp_cells);
+    totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
 
     return alignment_scores_float;
 }
@@ -3292,7 +3346,11 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
 
 
 
-std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const Options& options){
+std::vector<float> processBatch_overlapped(
+    const batch& fullBatch_default, 
+    const Options& options, 
+    const CountsOfDPCells& countsOfDPCells
+){
     helpers::CpuTimer totalTimer("processBatch_overlapped");
 
     // pinned_batch fullBatch(fullBatch_default);
@@ -3317,12 +3375,9 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
     const int* offset_hap_batches       = fullBatch.batch_haps_offsets.data(); //batch_2.chars.data();
     const int* offset_read_batches       = fullBatch.batch_reads_offsets.data(); //batch_2.chars.data();
 
-    int totalNumberOfAlignments = 0;
-    for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
+    const int totalNumberOfAlignments = fullBatch.getTotalNumberOfAlignments();
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-
-    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch_default);
 
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
@@ -3627,7 +3682,7 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
     }
 
     totalTimer.stop();
-    totalTimer.printGCUPS(dp_cells);
+    totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
 
     return alignment_scores_float;
 }
@@ -3638,7 +3693,11 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
 
 
 
-std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Options& /*options*/){
+std::vector<float> processBatchAsWhole_float(
+    const batch& fullBatch, 
+    const Options& /*options*/, 
+    const CountsOfDPCells& countsOfDPCells
+){
     helpers::CpuTimer totalTimer("processBatchAsWhole_float");
 
     const uint8_t* read_chars       = fullBatch.reads.data(); //batch_2.chars.data();
@@ -3660,12 +3719,9 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
     const int* offset_hap_batches       = fullBatch.batch_haps_offsets.data(); //batch_2.chars.data();
     const int* offset_read_batches       = fullBatch.batch_reads_offsets.data(); //batch_2.chars.data();
 
-    int totalNumberOfAlignments = 0;
-    for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
+    const int totalNumberOfAlignments = fullBatch.getTotalNumberOfAlignments();
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-
-    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch);
 
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
@@ -3869,11 +3925,10 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
 
     for(int p = 0; p < numPartitions; p++){
         if(h_numAlignmentsPerPartition[p] > 0){
-            //don't know the number of dp cells for each kernel, so just print runtime
-            perKernelTimers[p]->print();
+            perKernelTimers[p]->printGCUPS(countsOfDPCells.dpCellsPerPartition[p]);
         }
     }
-    computeTimer.printGCUPS(dp_cells);
+    computeTimer.printGCUPS(countsOfDPCells.totalDPCells);
 
     cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
 
@@ -3882,7 +3937,7 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
     for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
 
     totalTimer.stop();
-    totalTimer.printGCUPS(dp_cells);
+    totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
 
     return alignment_scores_float;
 }
@@ -3892,7 +3947,11 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
 
 
 
-std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default, const Options& options){
+std::vector<float> processBatch_overlapped_float(
+    const batch& fullBatch_default, 
+    const Options& options, 
+    const CountsOfDPCells& countsOfDPCells
+){
     helpers::CpuTimer totalTimer("processBatch_overlapped_float");
 
     // pinned_batch fullBatch(fullBatch_default);
@@ -3917,12 +3976,9 @@ std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default,
     const int* offset_hap_batches       = fullBatch.batch_haps_offsets.data(); //batch_2.chars.data();
     const int* offset_read_batches       = fullBatch.batch_reads_offsets.data(); //batch_2.chars.data();
 
-    int totalNumberOfAlignments = 0;
-    for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
+    const int totalNumberOfAlignments = fullBatch.getTotalNumberOfAlignments();
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-
-    const uint64_t dp_cells = computeNumberOfDPCells(fullBatch_default);
 
     cudaStream_t streams_part[numPartitions];
     for (int i=0; i<numPartitions; i++) cudaStreamCreate(&streams_part[i]);
@@ -4227,7 +4283,7 @@ std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default,
     }
 
     totalTimer.stop();
-    totalTimer.printGCUPS(dp_cells);
+    totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
 
     return alignment_scores_float;
 }
@@ -4359,6 +4415,8 @@ int main(const int argc, char const * const argv[])
     timerParseInputFile.stop();
     timerParseInputFile.print();
 
+    CountsOfDPCells countsOfDPCells = countDPCellsInBatch(fullBatch);
+
 
 
     const size_t read_bytes = fullBatch.reads.size();
@@ -4418,22 +4476,26 @@ int main(const int argc, char const * const argv[])
 
 
 
-    std::vector<float> resultsBatchAsWhole = processBatchAsWhole(fullBatch, options);
-
-    
-    std::vector<float> resultsBatchOverlapped = processBatch_overlapped(fullBatch, options);
-
-    std::vector<float> resultsBatchAsWhole_float = processBatchAsWhole_float(fullBatch, options);    
-    std::vector<float> resultsBatchOverlapped_float = processBatch_overlapped_float(fullBatch, options);
-
-    int numErrors = 0;
-    for(int i = 0; i < int(resultsBatchAsWhole.size()); i++){
-        if(resultsBatchAsWhole[i] != resultsBatchOverlapped[i]){
-            std::cout << "error i " << i << " : " << resultsBatchAsWhole[i] << " " <<  resultsBatchOverlapped[i] << "\n";
-            numErrors++;
-            if(numErrors > 10) break;
-        }
+    std::vector<float> resultsBatchAsWhole = processBatchAsWhole(fullBatch, options, countsOfDPCells);    
+    std::vector<float> resultsBatchOverlapped = processBatch_overlapped(fullBatch, options, countsOfDPCells);
+    if(resultsBatchAsWhole != resultsBatchOverlapped){
+        std::cout << "ERROR: resultsBatchAsWhole != resultsBatchOverlapped\n";
     }
+
+    std::vector<float> resultsBatchAsWhole_float = processBatchAsWhole_float(fullBatch, options, countsOfDPCells);
+    std::vector<float> resultsBatchOverlapped_float = processBatch_overlapped_float(fullBatch, options, countsOfDPCells);
+    if(resultsBatchAsWhole_float != resultsBatchOverlapped_float){
+        std::cout << "ERROR: resultsBatchAsWhole_float != resultsBatchOverlapped_float\n";
+    }
+
+    // int numErrors = 0;
+    // for(int i = 0; i < int(resultsBatchAsWhole.size()); i++){
+    //     if(resultsBatchAsWhole[i] != resultsBatchOverlapped[i]){
+    //         std::cout << "error i " << i << " : " << resultsBatchAsWhole[i] << " " <<  resultsBatchOverlapped[i] << "\n";
+    //         numErrors++;
+    //         if(numErrors > 10) break;
+    //     }
+    // }
 
     if(options.checkResults){
         const int numBatches = fullBatch.batch_haps.size();
