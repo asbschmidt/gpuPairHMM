@@ -3063,10 +3063,6 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
     for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-    std::cout << "Calculating:  " << totalNumberOfAlignments << " alignments in " << num_batches << " batches \n";
-    std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
-    std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
-
 
     const uint64_t dp_cells = computeNumberOfDPCells(fullBatch);
 
@@ -3308,9 +3304,6 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
     for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-    std::cout << "Calculating:  " << totalNumberOfAlignments << " alignments in " << num_batches << " batches \n";
-    std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
-    std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
 
     const uint64_t dp_cells = computeNumberOfDPCells(fullBatch_default);
 
@@ -3346,54 +3339,6 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
     thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
     thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
     std::vector<int, PinnedAllocator<int>> h_numAlignmentsPerPartition(numPartitions);
-
-    // std::vector<thrust::device_vector<uint8_t>> dev_read_chars_vec(read_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_hap_chars_vec(hap_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_base_qual_vec(read_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_ins_qual_vec(read_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_del_qual_vec(read_bytes);
-
-    // std::vector<thrust::device_vector<int>> dev_offset_reads_vec(num_reads);
-    // std::vector<thrust::device_vector<int>> dev_offset_haps_vec(num_haps);
-    // std::vector<thrust::device_vector<int>> dev_read_len_vec(num_reads);
-    // std::vector<thrust::device_vector<int>> dev_hap_len_vec(num_haps);
-    // std::vector<thrust::device_vector<int>> dev_read_batches_vec(num_batches);
-    // std::vector<thrust::device_vector<int>> dev_hap_batches_vec(num_batches);
-    // std::vector<thrust::device_vector<int>> dev_offset_read_batches_vec(num_batches);
-    // std::vector<thrust::device_vector<int>> dev_offset_hap_batches_vec(num_batches);
-
-    // thrust::device_vector<int> d_numIndicesPerPartitionPerBatch(num_batches * numPartitions, 0);
-    // thrust::device_vector<int> d_indicesPerPartitionPerBatch(num_reads * numPartitions, -1);
-    // thrust::device_vector<int> d_resultOffsetsPerBatch(num_batches);
-    // thrust::device_vector<int> d_numAlignmentsPerBatch(num_batches * numPartitions);
-    // thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
-    // thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
-    // std::vector<int, PinnedAllocator<int>> h_numAlignmentsPerPartition(numPartitions);
-
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_read_chars(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_hap_chars(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_base_qual(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_ins_qual(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_del_qual(2);
-
-    // std::vector<thrust::device_vector<int>> vec_d_offset_reads_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_offset_haps_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_read_len_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_hap_len_vec(2);
-
-    // std::vector<thrust::device_vector<int>> vec_d_read_batches_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_hap_batches_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_offset_read_batches_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_offset_hap_batches_vec(2);
-
-    // for(int i = 0; i < 2; i++){
-    //     vec_d_read_chars.emplace_back(64*1024*1024);
-    //     vec_d_hap_chars.emplace_back(64*1024*1024);
-    //     vec_d_base_qual.emplace_back(64*1024*1024);
-    //     vec_d_ins_qual.emplace_back(64*1024*1024);
-    //     vec_d_del_qual.emplace_back(64*1024*1024);
-    //     vec_d_offset_reads_vec.emplace_back(numReads / numTransferChunks);
-    // }
 
     uint8_t* const dev_read_chars = dev_read_chars_vec.data().get();
     uint8_t* const dev_hap_chars = dev_hap_chars_vec.data().get();
@@ -3702,10 +3647,6 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
     for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-    std::cout << "Calculating:  " << totalNumberOfAlignments << " alignments in " << num_batches << " batches \n";
-    std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
-    std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
-
 
     const uint64_t dp_cells = computeNumberOfDPCells(fullBatch);
 
@@ -3947,9 +3888,6 @@ std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default,
     for (int i=0; i<num_batches; i++) totalNumberOfAlignments += read_batches[i] * hap_batches[i];
 
     std::vector<float> alignment_scores_float(totalNumberOfAlignments);
-    std::cout << "Calculating:  " << totalNumberOfAlignments << " alignments in " << num_batches << " batches \n";
-    std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
-    std::cout << "num_reads:  " << num_reads << ", num_haps  " << num_haps << " \n";
 
     const uint64_t dp_cells = computeNumberOfDPCells(fullBatch_default);
 
@@ -3985,54 +3923,6 @@ std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default,
     thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
     thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
     std::vector<int, PinnedAllocator<int>> h_numAlignmentsPerPartition(numPartitions);
-
-    // std::vector<thrust::device_vector<uint8_t>> dev_read_chars_vec(read_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_hap_chars_vec(hap_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_base_qual_vec(read_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_ins_qual_vec(read_bytes);
-    // std::vector<thrust::device_vector<uint8_t>> dev_del_qual_vec(read_bytes);
-
-    // std::vector<thrust::device_vector<int>> dev_offset_reads_vec(num_reads);
-    // std::vector<thrust::device_vector<int>> dev_offset_haps_vec(num_haps);
-    // std::vector<thrust::device_vector<int>> dev_read_len_vec(num_reads);
-    // std::vector<thrust::device_vector<int>> dev_hap_len_vec(num_haps);
-    // std::vector<thrust::device_vector<int>> dev_read_batches_vec(num_batches);
-    // std::vector<thrust::device_vector<int>> dev_hap_batches_vec(num_batches);
-    // std::vector<thrust::device_vector<int>> dev_offset_read_batches_vec(num_batches);
-    // std::vector<thrust::device_vector<int>> dev_offset_hap_batches_vec(num_batches);
-
-    // thrust::device_vector<int> d_numIndicesPerPartitionPerBatch(num_batches * numPartitions, 0);
-    // thrust::device_vector<int> d_indicesPerPartitionPerBatch(num_reads * numPartitions, -1);
-    // thrust::device_vector<int> d_resultOffsetsPerBatch(num_batches);
-    // thrust::device_vector<int> d_numAlignmentsPerBatch(num_batches * numPartitions);
-    // thrust::device_vector<int> d_numAlignmentsPerBatchInclPrefixSum(num_batches * numPartitions);
-    // thrust::device_vector<int> d_numAlignmentsPerPartition(numPartitions);
-    // std::vector<int, PinnedAllocator<int>> h_numAlignmentsPerPartition(numPartitions);
-
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_read_chars(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_hap_chars(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_base_qual(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_ins_qual(2);
-    // std::vector<thrust::device_vector<uint8_t>> vec_d_del_qual(2);
-
-    // std::vector<thrust::device_vector<int>> vec_d_offset_reads_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_offset_haps_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_read_len_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_hap_len_vec(2);
-
-    // std::vector<thrust::device_vector<int>> vec_d_read_batches_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_hap_batches_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_offset_read_batches_vec(2);
-    // std::vector<thrust::device_vector<int>> vec_d_offset_hap_batches_vec(2);
-
-    // for(int i = 0; i < 2; i++){
-    //     vec_d_read_chars.emplace_back(64*1024*1024);
-    //     vec_d_hap_chars.emplace_back(64*1024*1024);
-    //     vec_d_base_qual.emplace_back(64*1024*1024);
-    //     vec_d_ins_qual.emplace_back(64*1024*1024);
-    //     vec_d_del_qual.emplace_back(64*1024*1024);
-    //     vec_d_offset_reads_vec.emplace_back(numReads / numTransferChunks);
-    // }
 
     uint8_t* const dev_read_chars = dev_read_chars_vec.data().get();
     uint8_t* const dev_hap_chars = dev_hap_chars_vec.data().get();
@@ -4436,12 +4326,22 @@ int main(const int argc, char const * const argv[])
     timerParseInputFile.stop();
     timerParseInputFile.print();
 
+
+
+    const size_t read_bytes = fullBatch.reads.size();
+    const size_t hap_bytes = fullBatch.haps.size();   
+    const int numBatches = fullBatch.batch_reads.size();
+    const int numReads = fullBatch.readlen.size();
+    const int numHaps = fullBatch.haplen.size();
+
+
+    std::cout << "Calculating:  " << fullBatch.getTotalNumberOfAlignments() << " alignments in " << numBatches << " batches \n";
+    std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
+    std::cout << "num_reads:  " << numReads << ", num_haps  " << numHaps << " \n";
+
     #if 0
     {
-        const int numBatches = fullBatch.batch_reads.size();
-        const int numReads = fullBatch.readlen.size();
-        const int numHaps = fullBatch.haplen.size();
-        std::cout << "numBatches: " << numBatches << " numReads: " << numReads << ", numHaps: " << numHaps << "\n";
+        
         std::cout << "batch_haps:\n";
         for(const auto& x : fullBatch.batch_haps) std::cout << x << " ";
         std::cout << "\n";

@@ -73,13 +73,17 @@ namespace helpers {
         }
 
         void print(){
-            os << "# elapsed time ("<< name <<"): " << elapsed()  << "s\n";
+            const float seconds = elapsed();
+            const float milis = seconds * 1000.0f;
+            os << "TIMING: " << milis << " ms (" << name << ")\n";
         }
 
         void printGCUPS(double cells){
+            const float seconds = elapsed();
+            const float milis = seconds * 1000.0f;
             double gcups = cells / 1000. / 1000. / 1000.;
-            gcups = gcups / (elapsed());
-            os << "TIMING: " << elapsed() << " s " << gcups << " GCUPS (" << name << ")\n";
+            gcups = gcups / seconds;
+            os << "TIMING: " << milis << " ms " << gcups << " GCUPS (" << name << ")\n";
         }
 
         void print_throughput(std::size_t bytes, int num){
