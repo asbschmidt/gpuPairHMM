@@ -76,6 +76,7 @@ struct PartitionLimits{
         return 10;
     }
     PartitionLimits() = default;
+    #if 0
     int boundaries[10]{
         64,  // 48
         //80,
@@ -89,8 +90,156 @@ struct PartitionLimits{
         512,
         576
     };
+    #endif
+
+    #if 1
+    int boundaries[10]{
+        48,
+        64,
+        80,
+        96,
+        128,
+        160,
+        192,
+        256,
+        320,
+        384,
+    };
+    #endif
 };
 constexpr int numPartitions = PartitionLimits::numPartitions();
+
+#if 1
+#define LAUNCH_ALL_KERNELS \
+    if (h_numAlignmentsPerPartition[0]){ \
+        constexpr int partitionId = 0; \
+        constexpr int group_size = 4; \
+        constexpr int numRegs = 12; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]); \
+    } \
+    if (h_numAlignmentsPerPartition[1]){ \
+        constexpr int partitionId = 1; \
+        constexpr int group_size = 4; \
+        constexpr int numRegs = 16; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]); \
+    } \
+    if (h_numAlignmentsPerPartition[2]){ \
+        constexpr int partitionId = 2; \
+        constexpr int group_size = 4; \
+        constexpr int numRegs = 20; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]); \
+    } \
+    if (h_numAlignmentsPerPartition[3]){ \
+        constexpr int partitionId = 3; \
+        constexpr int group_size = 8; \
+        constexpr int numRegs = 12; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]); \
+    } \
+    if (h_numAlignmentsPerPartition[4]){ \
+        constexpr int partitionId = 4; \
+        constexpr int group_size = 8; \
+        constexpr int numRegs = 16; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]); \
+    } \
+    if (h_numAlignmentsPerPartition[5]){ \
+        constexpr int partitionId = 5; \
+        constexpr int group_size = 8; \
+        constexpr int numRegs = 20; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]); \
+    } \
+    if (h_numAlignmentsPerPartition[6]){ \
+        constexpr int partitionId = 6; \
+        constexpr int group_size = 16; \
+        constexpr int numRegs = 12; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]); \
+    } \
+    if (h_numAlignmentsPerPartition[7]){ \
+        constexpr int partitionId = 7; \
+        constexpr int group_size = 16; \
+        constexpr int numRegs = 16; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[7]); \
+    } \
+    if (h_numAlignmentsPerPartition[8]){ \
+        constexpr int partitionId = 8; \
+        constexpr int group_size = 16; \
+        constexpr int numRegs = 20; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[8]); \
+    } \
+    if (h_numAlignmentsPerPartition[9]){ \
+        constexpr int partitionId = 9; \
+        constexpr int group_size = 32; \
+        constexpr int numRegs = 12; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[9]); \
+    }
+#endif
+
+
+#if 0
+#define LAUNCH_ALL_KERNELS \
+    if (h_numAlignmentsPerPartition[0]){ \
+        constexpr int partitionId = 0; \
+        constexpr int group_size = 8; \
+        constexpr int numRegs = 8; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]); \
+    } \
+    if (h_numAlignmentsPerPartition[1]){ \
+        constexpr int partitionId = 1; \
+        constexpr int group_size = 8; \
+        constexpr int numRegs = 12; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]); \
+    } \
+    if (h_numAlignmentsPerPartition[2]){ \
+        constexpr int partitionId = 2; \
+        constexpr int group_size = 16; \
+        constexpr int numRegs = 8; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]); \
+    } \
+    if (h_numAlignmentsPerPartition[3]){ \
+        constexpr int partitionId = 3; \
+        constexpr int group_size = 8; \
+        constexpr int numRegs = 20; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]); \
+    } \
+    if (h_numAlignmentsPerPartition[4]){ \
+        constexpr int partitionId = 4; \
+        constexpr int group_size = 16; \
+        constexpr int numRegs = 16; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]); \
+    } \
+    if (h_numAlignmentsPerPartition[5]){ \
+        constexpr int partitionId = 5; \
+        constexpr int group_size = 16; \
+        constexpr int numRegs = 20; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]); \
+    } \
+    if (h_numAlignmentsPerPartition[6]){ \
+        constexpr int partitionId = 6; \
+        constexpr int group_size = 16; \
+        constexpr int numRegs = 24; \
+        constexpr int blocksize = 32; \
+        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]); \
+    }
+
+#endif
+
+
+
 
 
 struct Options{
@@ -3108,55 +3257,8 @@ std::vector<float> processBatchAsWhole(const batch& fullBatch, const Options& /*
             dev_offset_read_batches,  num_batches, d_resultOffsetsPerBatch.data().get(), d_numAlignmentsPerBatch.data().get() + partitionId * num_batches, d_numAlignmentsPerBatchInclPrefixSum.data().get() + partitionId * num_batches, numAlignmentsInPartition); \
 
 
-    if (h_numAlignmentsPerPartition[0]){
-        constexpr int partitionId = 0;
-        constexpr int group_size = 8;
-        constexpr int numRegs = 8;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]);
-    }
-    if (h_numAlignmentsPerPartition[1]){
-        constexpr int partitionId = 1;
-        constexpr int group_size = 8;
-        constexpr int numRegs = 12;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]);
-    }
-    if (h_numAlignmentsPerPartition[2]){
-        constexpr int partitionId = 2;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 8;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]);
-    }
-    if (h_numAlignmentsPerPartition[3]){
-        constexpr int partitionId = 3;
-        constexpr int group_size = 8;
-        constexpr int numRegs = 20;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]);
-    }
-    if (h_numAlignmentsPerPartition[4]){
-        constexpr int partitionId = 4;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 16;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]);
-    }
-    if (h_numAlignmentsPerPartition[5]){
-        constexpr int partitionId = 5;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 20;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]);
-    }
-    if (h_numAlignmentsPerPartition[6]){
-        constexpr int partitionId = 6;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 24;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]);
-    }
+    LAUNCH_ALL_KERNELS
+
     #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
 
     computeTimer.stop();
@@ -3541,55 +3643,7 @@ std::vector<float> processBatch_overlapped(const batch& fullBatch_default, const
             numProcessedAlignmentsByCurrentChunk += numAlignmentsInPartition;
 
 
-        if (h_numAlignmentsPerPartition[0]){
-            constexpr int partitionId = 0;
-            constexpr int group_size = 8;
-            constexpr int numRegs = 8;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]);
-        }
-        if (h_numAlignmentsPerPartition[1]){
-            constexpr int partitionId = 1;
-            constexpr int group_size = 8;
-            constexpr int numRegs = 12;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]);
-        }
-        if (h_numAlignmentsPerPartition[2]){
-            constexpr int partitionId = 2;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 8;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]);
-        }
-        if (h_numAlignmentsPerPartition[3]){
-            constexpr int partitionId = 3;
-            constexpr int group_size = 8;
-            constexpr int numRegs = 20;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]);
-        }
-        if (h_numAlignmentsPerPartition[4]){
-            constexpr int partitionId = 4;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 16;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]);
-        }
-        if (h_numAlignmentsPerPartition[5]){
-            constexpr int partitionId = 5;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 20;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]);
-        }
-        if (h_numAlignmentsPerPartition[6]){
-            constexpr int partitionId = 6;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 24;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]);
-        }
+        LAUNCH_ALL_KERNELS
 
         numProcessedAlignmentsByChunks += numProcessedAlignmentsByCurrentChunk;
         numProcessedBatchesByChunks += numBatchesInChunk;
@@ -3842,55 +3896,8 @@ std::vector<float> processBatchAsWhole_float(const batch& fullBatch, const Optio
             dev_offset_read_batches,  num_batches, d_resultOffsetsPerBatch.data().get(), d_numAlignmentsPerBatch.data().get() + partitionId * num_batches, d_numAlignmentsPerBatchInclPrefixSum.data().get() + partitionId * num_batches, numAlignmentsInPartition); \
 
 
-    if (h_numAlignmentsPerPartition[0]){
-        constexpr int partitionId = 0;
-        constexpr int group_size = 8;
-        constexpr int numRegs = 8;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]);
-    }
-    if (h_numAlignmentsPerPartition[1]){
-        constexpr int partitionId = 1;
-        constexpr int group_size = 8;
-        constexpr int numRegs = 12;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]);
-    }
-    if (h_numAlignmentsPerPartition[2]){
-        constexpr int partitionId = 2;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 8;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]);
-    }
-    if (h_numAlignmentsPerPartition[3]){
-        constexpr int partitionId = 3;
-        constexpr int group_size = 8;
-        constexpr int numRegs = 20;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]);
-    }
-    if (h_numAlignmentsPerPartition[4]){
-        constexpr int partitionId = 4;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 16;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]);
-    }
-    if (h_numAlignmentsPerPartition[5]){
-        constexpr int partitionId = 5;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 20;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]);
-    }
-    if (h_numAlignmentsPerPartition[6]){
-        constexpr int partitionId = 6;
-        constexpr int group_size = 16;
-        constexpr int numRegs = 24;
-        constexpr int blocksize = 32;
-        COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]);
-    }
+    LAUNCH_ALL_KERNELS
+
     #undef  COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM
 
     computeTimer.stop();
@@ -4275,55 +4282,7 @@ std::vector<float> processBatch_overlapped_float(const batch& fullBatch_default,
             numProcessedAlignmentsByCurrentChunk += numAlignmentsInPartition;
 
 
-        if (h_numAlignmentsPerPartition[0]){
-            constexpr int partitionId = 0;
-            constexpr int group_size = 8;
-            constexpr int numRegs = 8;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[0]);
-        }
-        if (h_numAlignmentsPerPartition[1]){
-            constexpr int partitionId = 1;
-            constexpr int group_size = 8;
-            constexpr int numRegs = 12;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[1]);
-        }
-        if (h_numAlignmentsPerPartition[2]){
-            constexpr int partitionId = 2;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 8;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[2]);
-        }
-        if (h_numAlignmentsPerPartition[3]){
-            constexpr int partitionId = 3;
-            constexpr int group_size = 8;
-            constexpr int numRegs = 20;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[3]);
-        }
-        if (h_numAlignmentsPerPartition[4]){
-            constexpr int partitionId = 4;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 16;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[4]);
-        }
-        if (h_numAlignmentsPerPartition[5]){
-            constexpr int partitionId = 5;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 20;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[5]);
-        }
-        if (h_numAlignmentsPerPartition[6]){
-            constexpr int partitionId = 6;
-            constexpr int group_size = 16;
-            constexpr int numRegs = 24;
-            constexpr int blocksize = 32;
-            COMPUTE_NUM_ALIGNMENTS_AND_PAIRHMM(streams_part[6]);
-        }
+        LAUNCH_ALL_KERNELS
 
         numProcessedAlignmentsByChunks += numProcessedAlignmentsByCurrentChunk;
         numProcessedBatchesByChunks += numBatchesInChunk;
