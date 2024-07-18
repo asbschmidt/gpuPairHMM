@@ -4327,9 +4327,9 @@ int main(const int argc, char const * const argv[])
     }
 
     
-    std::cout << "options.inputfile = " << options.inputfile << "\n";
-    std::cout << "options.outputfile = " << options.outputfile << "\n";
-    std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
+    // std::cout << "options.inputfile = " << options.inputfile << "\n";
+    // std::cout << "options.outputfile = " << options.outputfile << "\n";
+    // std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
     std::cout << "options.checkResults = " << options.checkResults << "\n";
 
 
