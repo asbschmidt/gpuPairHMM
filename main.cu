@@ -918,6 +918,7 @@ void PairHMM_align_partition_half_allowMultipleBatchesPerWarp_coalesced_smem(
     const int numAlignments
 ) {
     static_assert(numRegs % 4 == 0);
+    static_assert(group_size >= 2);
 
     constexpr int blocksize = 32;
     constexpr int warpsize = 32;
@@ -927,10 +928,14 @@ void PairHMM_align_partition_half_allowMultipleBatchesPerWarp_coalesced_smem(
     constexpr int rowsizePadded = SDIV(rowsize, 8) * 8; //pad to 16 bytes
     alignas(16) __shared__ half lambda_array_permuted[5][rowsizePadded];
 
+    // constexpr int rowsize = numGroupsPerBlock * group_size*SDIV(numRegs, 8) * 8;
+    // constexpr int rowsizePadded = SDIV(rowsize, 8) * 8; //pad to 16 bytes
+    // alignas(16) __shared__ half lambda_array_permuted[5][rowsizePadded];
+
 
     float M[numRegs], I, D[numRegs];
     half2 alpha[numRegs/2], delta[numRegs/2], sigma[numRegs/2];
-    float Results[numRegs];
+    alignas(8) float Results[numRegs]; //align to float2
 
     const int threadIdInGroup = threadIdx.x % group_size;
     // const int groupIdInBlock = threadIdx.x / group_size;
@@ -1546,6 +1551,7 @@ void PairHMM_align_partition_half_allowMultipleBatchesPerWarp_coalesced_smem(
         };
 
         auto calc_DP_float = [&](){
+            //for float4 (which is not working currently), need to also change alignas of Result, and smem output buffering at the end
             calc_DP_float_float2();
         };
 
@@ -1643,8 +1649,25 @@ void PairHMM_align_partition_half_allowMultipleBatchesPerWarp_coalesced_smem(
         //}
 
 
+        //repurpose shared memory to stage output. 
+        //since the output register index is computed at runtime, 
+        //the compiler frequently stores the Results in local memory to be able to load the specific value at the end.
+        //doing this once manually in shared memory avoids the atuomatic stores to local memory
+        __syncwarp(myGroupMask);
+        float* smemOutputBuffer = (float*)&lambda_array_permuted[0][0];
+
+
         if (threadIdInGroup == result_thread) {
-            float temp_res = Results[result_reg];
+            // float temp_res = Results[result_reg];
+
+            float2* smemOutputBuffer2 = (float2*)smemOutputBuffer;
+            #pragma unroll
+            for(int i = 0; i < numRegs/2; i++){
+                //need to ensure that we only access smem elements which are used by the group. here we use the same access pattern as during computations (warp striped)
+                smemOutputBuffer2[i * warpsize + threadIdInWarp] = *((float2*)&Results[2*i]);
+            }
+            float temp_res = smemOutputBuffer[2*(result_reg/2 * warpsize + threadIdInWarp) + (result_reg % 2)];
+
             temp_res =  log10f(temp_res) - log10f(constant);
             devAlignmentScores[resultOutputIndex] = temp_res;
         }
@@ -2112,17 +2135,15 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem(
     constexpr int warpsize = 32;
     constexpr int numGroupsPerBlock = blocksize / group_size;
 
-    // constexpr int rowsize = (group_size == 8 && numRegs == 20) ? numGroupsPerBlock * group_size * 24 : numGroupsPerBlock * group_size*numRegs;
-    // constexpr int rowsize = SDIV(numGroupsPerBlock * group_size*numRegs, 128) * 128;
     constexpr int rowsize = numGroupsPerBlock * group_size*numRegs;
     alignas(16) __shared__ float lambda_array_permuted[5][rowsize];
 
     float M[numRegs], I, D[numRegs];
     float alpha[numRegs], delta[numRegs], sigma[numRegs];
-    float Results[numRegs];
+    alignas(16) float Results[numRegs];
 
     const int threadIdInGroup = threadIdx.x % group_size;
-    const int groupIdInBlock = threadIdx.x / group_size;
+    // const int groupIdInBlock = threadIdx.x / group_size;
     const int threadIdInWarp = threadIdx.x % warpsize;
     const int groupIdInWarp = threadIdInWarp / group_size;
     const int groupIdInGrid = (threadIdx.x + blockIdx.x * blockDim.x) / group_size;
@@ -2175,6 +2196,8 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem(
         const float constant = ::cuda::std::numeric_limits<float>::max() / 16;
 
         auto construct_PSSM_warp_coalesced = [&](){
+            __syncwarp(myGroupMask);
+            
             const char4* QualsAsChar4 = reinterpret_cast<const char4*>(&base_quals[byteOffsetForRead]);
             const char4* ReadsAsChar4 = reinterpret_cast<const char4*>(&read_chars[byteOffsetForRead]);
             for (int i=threadIdInGroup; i<(readLength+3)/4; i+=group_size) {
@@ -2252,68 +2275,6 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem(
             __syncwarp(myGroupMask);
         };
 
-
-        auto construct_PSSM_group_coalesced = [&](){
-            const char4* QualsAsChar4 = reinterpret_cast<const char4*>(&base_quals[byteOffsetForRead]);
-            const char4* ReadsAsChar4 = reinterpret_cast<const char4*>(&read_chars[byteOffsetForRead]);
-            for (int i=threadIdInGroup; i<(readLength+3)/4; i+=group_size) {
-                const char4 temp0 = QualsAsChar4[i];
-                const char4 temp1 = ReadsAsChar4[i];
-                alignas(4) char quals[4];
-                memcpy(&quals[0], &temp0, sizeof(char4));
-                alignas(4) char letters[4];
-                memcpy(&letters[0], &temp1, sizeof(char4));
-
-                float probs[4];
-                #pragma unroll
-                for(int c = 0; c < 4; c++){
-                    probs[c] = cPH2PR[quals[c]];
-                }
-
-                alignas(16) float rowResult[5][4];
-
-                #pragma unroll
-                for(int c = 0; c < 4; c++){
-                    //hap == N always matches
-                    rowResult[4][c] = 1 - probs[c]; //match
-
-                    if(letters[c] < 4){
-                        // set hap == read to 1 - prob, hap != read to prob / 3
-                        #pragma unroll
-                        for (int j=0; j<4; j++){
-                            rowResult[j][c] = (j == letters[c]) ? 1 - probs[c] : probs[c]/3.0f; //match or mismatch
-                        }
-                    }else{
-                        // read == N always matches
-                        #pragma unroll
-                        for (int j=0; j<4; j++){
-                            rowResult[j][c] = 1 - probs[c]; //match
-                        }
-                    }
-                }
-
-                //figure out where to save float4 in shared memory to allow coalesced read access to shared memory
-                //read access will be coalesced within the group
-
-                constexpr int numAccesses = numRegs/4;
-
-                const int accessChunk = i;
-                const int accessChunkIdInThread = accessChunk % numAccesses;
-                const int threadId = accessChunk / numAccesses;
-
-                const int outputAccessChunk = accessChunkIdInThread * group_size + threadId;
-                const int outputCol = outputAccessChunk;
-
-                #pragma unroll
-                for (int j=0; j<5; j++){
-                    float4* rowPtr = (float4*)(&lambda_array_permuted[j][groupIdInBlock * group_size * numRegs]);
-                    rowPtr[outputCol] = *((float4*)&rowResult[j][0]);
-                }
-            }
-
-            __syncwarp(myGroupMask);
-        };
-
         auto load_PSSM = [&](){
             construct_PSSM_warp_coalesced();
         };
@@ -2366,11 +2327,6 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem(
         
         auto calc_DP_float = [&](int row){
             
-
-            //group coalesced
-            // float4* sbt_row = (float4*)(&lambda_array_permuted[hap_letter][groupIdInBlock*(group_size*numRegs)]);
-            // float4 foo = *((float4*)(&sbt_row[0 * group_size + threadIdInGroup]));
-
             //warp coalesced
             float4* sbt_row = (float4*)(&lambda_array_permuted[hap_letter]);
             float4 foo = *((float4*)(&sbt_row[0 * warpsize + threadIdInWarp]));
@@ -2417,7 +2373,6 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem(
 
             #pragma unroll
             for (int i=1; i<numRegs/4; i++) {
-                // float4 foo = *((float4*)(&sbt_row[(i * group_size + threadIdInGroup)]));
                 float4 foo = *((float4*)(&sbt_row[i * warpsize + threadIdInWarp]));
 
                 // if(group_size == 8 && numRegs == 20){
@@ -2557,9 +2512,25 @@ void PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem(
         //    Results[p] += I;
         //}
 
+        //repurpose shared memory to stage output. 
+        //since the output register index is computed at runtime, 
+        //the compiler frequently stores the Results in local memory to be able to load the specific value at the end.
+        //doing this once manually in shared memory avoids the atuomatic stores to local memory
+        __syncwarp(myGroupMask);
+        float* smemOutputBuffer = &lambda_array_permuted[0][0];
+
 
         if (threadIdInGroup == result_thread) {
-            float temp_res = Results[result_reg];
+            // float temp_res = Results[result_reg];
+
+            float4* smemOutputBuffer4 = (float4*)smemOutputBuffer;
+            #pragma unroll
+            for(int i = 0; i < numRegs/4; i++){
+                //need to ensure that we only access smem elements which are used by the group. here we use the same access pattern as during computations (warp striped)
+                smemOutputBuffer4[i * warpsize + threadIdInWarp] = *((float4*)&Results[4*i]);
+            }
+            float temp_res = smemOutputBuffer[4*(result_reg/4 * warpsize + threadIdInWarp) + (result_reg % 4)];
+
             temp_res =  log10f(temp_res) - log10f(constant);
             devAlignmentScores[resultOutputIndex] = temp_res;
         }
@@ -6950,6 +6921,12 @@ int main(const int argc, char const * const argv[])
     if(resultsBatchAsWhole_half_coalesced_smem != resultsBatchOverlapped_half_coalesced_smem){
         std::cout << "ERROR: resultsBatchAsWhole_half_coalesced_smem != resultsBatchOverlapped_half_coalesced_smem\n";
     }
+
+    // std::vector<float> resultsCPU = processBatchCPUFaster(fullBatch, ph2pr);
+    // std::cout << "comparing half coalesced smem:\n";
+    // computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
+    // computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
+
     // if(resultsBatchAsWhole_half != resultsBatchAsWhole_half_coalesced_smem){
     //     std::cout << "ERROR: resultsBatchAsWhole_half != resultsBatchAsWhole_half_coalesced_smem\n";
     //     for(size_t i = 0; i < resultsBatchAsWhole_half.size(); i++){
