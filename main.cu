@@ -248,6 +248,7 @@ struct Options{
     std::string outputfile = "";
     int transferchunksize = 100000;
     bool checkResults = false;
+    bool peakBenchFloat = false;
 };
 
 template <class T>
@@ -3942,7 +3943,7 @@ void print_batch(batch& batch_){
 
 }
 
-batch read_batch(std::ifstream& file_, std::vector<float> /*ph2pr*/, int nread, int nhapl, bool print=false, int lastreadoffset=0, int lasthapoffset=0){
+batch read_batch(std::ifstream& file_, const std::vector<float>& /*ph2pr*/, int nread, int nhapl, bool print=false, int lastreadoffset=0, int lasthapoffset=0){
 
     batch batch_;
 
@@ -6773,25 +6774,51 @@ void computeRelativeErrorStatistics(const std::vector<float>& scoresA, const std
 
 
 
+batch parseInputFile(const std::string& filename, const std::vector<float>& ph2pr){
+    std::ifstream file_(filename);
+    if(!file_){
+        throw std::runtime_error("Could not open file" + filename);
+    }
+    batch fullBatch;
+    fullBatch.read_offsets.push_back(0);
+    fullBatch.hap_offsets.push_back(0);
+    int lastread = 0;
+    int lasthap = 0;
+    std::string linebuffer_;
+    while (!file_.eof()){
+
+        getline(file_, linebuffer_);
+        if (file_.good()){
+            const size_t split = linebuffer_.find(" ");
+            const int nread = stoi(linebuffer_.substr(0,split));
+            const int nhapl = stoi(linebuffer_.substr(split));
+
+            batch test = read_batch(file_, ph2pr, nread, nhapl, false, lastread, lasthap);
+            lasthap = test.lasthapoffset;
+            lastread = test.lastreadoffset;
+            concat_batch(fullBatch, test);
+        }
+    }
+    generate_batch_offsets(fullBatch);
+
+    return fullBatch;
+}
+
+
+
+void runPeakTestFloat(){
+
+}
+
+
+
 
 int main(const int argc, char const * const argv[])
 {
 
-    std::string const filename = "mini.in";
-    std::ifstream file_;
-    std::string linebuffer_;
-
     const int MAX_PH2PR_INDEX = 128;
 
-    std::vector<float> ph2pr =  generate_ph2pr(MAX_PH2PR_INDEX);
-
-    if (argc > 1){
-        file_ = start_stream(argv[1]);
-    }
-    else {
-        file_ = start_stream(filename);
-    }
-
+    std::vector<float> ph2pr = generate_ph2pr(MAX_PH2PR_INDEX);
 
     Options options;
 
@@ -6812,38 +6839,26 @@ int main(const int argc, char const * const argv[])
         if(argstring == "--checkResults"){
             options.checkResults = true;
         }
+        if(argstring == "--peakBenchFloat"){
+            options.peakBenchFloat = true;
+        }
     }
 
     
-    // std::cout << "options.inputfile = " << options.inputfile << "\n";
+    std::cout << "options.inputfile = " << options.inputfile << "\n";
     // std::cout << "options.outputfile = " << options.outputfile << "\n";
     // std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
     std::cout << "options.checkResults = " << options.checkResults << "\n";
+    std::cout << "options.peakBenchFloat = " << options.peakBenchFloat << "\n";
+
+    if(options.inputfile == ""){
+        throw std::runtime_error("Input file not specified");
+    }
+    
 
 
     helpers::CpuTimer timerParseInputFile("parse input file");
-    batch fullBatch;
-    {
-        fullBatch.read_offsets.push_back(0);
-        fullBatch.hap_offsets.push_back(0);
-        int lastread = 0;
-        int lasthap = 0;
-        while (!file_.eof()){
-
-            getline(file_, linebuffer_);
-            if (file_.good()){
-                const size_t split = linebuffer_.find(" ");
-                const int nread = stoi(linebuffer_.substr(0,split));
-                const int nhapl = stoi(linebuffer_.substr(split));
-
-                batch test = read_batch(file_, ph2pr, nread, nhapl, false, lastread, lasthap);
-                lasthap = test.lasthapoffset;
-                lastread = test.lastreadoffset;
-                concat_batch(fullBatch, test);
-            }
-        }
-        generate_batch_offsets(fullBatch);
-    }
+    batch fullBatch = parseInputFile(options.inputfile, ph2pr);
     timerParseInputFile.stop();
     timerParseInputFile.print();
 
