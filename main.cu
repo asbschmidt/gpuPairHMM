@@ -7,6 +7,7 @@
 #include <vector>
 #include <optional>
 #include <numeric>
+#include <random>
 
 #include <algorithm>
 #include <iterator>
@@ -23,6 +24,8 @@
 
 #include <cub/cub.cuh>
 
+#include <cuda/functional>
+
 #include "cuda_helpers.cuh"
 #include "timers.cuh"
 #include "Context.h"
@@ -34,6 +37,10 @@
 using std::cout;
 using std::copy;
 
+
+
+// #define ENABLE_PEAK_BENCH_HALF
+// #define ENABLE_PEAK_BENCH_FLOAT
 
 
 
@@ -249,6 +256,7 @@ struct Options{
     int transferchunksize = 100000;
     bool checkResults = false;
     bool peakBenchFloat = false;
+    bool peakBenchHalf = false;
 };
 
 template <class T>
@@ -6805,12 +6813,391 @@ batch parseInputFile(const std::string& filename, const std::vector<float>& ph2p
 }
 
 
+#ifdef ENABLE_PEAK_BENCH_HALF
 
-void runPeakTestFloat(){
+template<int group_size, int numRegs>
+void runPeakBenchHalfImpl(int sequencelength){
+    const int readLength = sequencelength;
+    const int hapLength = sequencelength;
+    const int paddedReadLength = SDIV(readLength, 4) * 4;
+    const int paddedHapLength = SDIV(hapLength, 4) * 4;
+    const int numReadsInBatch = 32;
+    const int numHapsInBatch = 32;
 
+    const size_t readBytes = 256 * 1024 * 1024;
+    const size_t hapBytes = 256 * 1024 * 1024;
+
+    if(readLength > group_size * numRegs){
+        std::cout << "read length " << readLength << " > " << group_size << " * " << numRegs << ". Skipping\n";
+        return;
+    }
+
+    
+    std::vector<char> readData(readBytes);
+    std::vector<char> hapData(hapBytes);
+    const char* letters = "ACGT";
+    
+    std::mt19937 gen(42);
+    std::uniform_int_distribution<> dist(0,3);
+    for(size_t i = 0; i < readBytes; i++){
+        readData[i] = letters[dist(gen)];
+    }
+    hapData = readData;
+    
+    const int numReadsInReadData = readBytes / paddedReadLength;
+    const int numHapsInHapData = hapBytes / paddedHapLength;
+    const int maxNumBatchesInGeneratedData = std::min(numReadsInReadData / numReadsInBatch, numHapsInHapData / numHapsInBatch);
+    const int numBatches = maxNumBatchesInGeneratedData;
+    const int totalNumReads = maxNumBatchesInGeneratedData * numReadsInBatch;
+    const int totalNumHaps = maxNumBatchesInGeneratedData * numHapsInBatch;
+    const int totalNumAlignments = numReadsInBatch * numHapsInBatch * numBatches;
+    const size_t totalDPCells = size_t(readLength) * size_t(hapLength) * size_t(numReadsInBatch) * size_t(numHapsInBatch) * size_t(numBatches);
+
+    // std::cout << "numReadsInReadData " << numReadsInReadData
+    //     << ", numHapsInHapData " << numHapsInHapData
+    //     << ", numBatches " << numBatches
+    //     << ", totalNumReads " << totalNumReads
+    //     << ", totalNumHaps " << totalNumHaps
+    //     << ", totalNumAlignments " << totalNumAlignments
+    //     << "\n";
+    
+    std::vector<int> readLengths(totalNumReads, readLength);
+    std::vector<int> hapLengths(totalNumHaps, hapLength);
+    std::vector<char> baseQuals(readBytes, 'I');
+    std::vector<char> insQuals(readBytes, 'I');
+    std::vector<char> delQuals(readBytes, 'I');
+
+    std::vector<int> readBeginOffsets(totalNumReads);
+    for(int i = 0; i < totalNumReads; i++){
+        readBeginOffsets[i] = i * paddedReadLength;
+    }
+    std::vector<int> hapBeginOffsets(totalNumHaps);
+    for(int i = 0; i < totalNumHaps; i++){
+        hapBeginOffsets[i] = i * paddedHapLength;
+    }
+
+
+    std::vector<int> numReadsPerBatch(numBatches, numReadsInBatch);
+    std::vector<int> numHapsPerBatch(numBatches, numHapsInBatch);
+    std::vector<int> numAlignmentsPerBatch(numBatches, numReadsInBatch * numHapsInBatch);
+    std::vector<int> numReadsPerBatchPrefixSum(numBatches);
+    std::vector<int> numHapsPerBatchPrefixSum(numBatches);
+    std::vector<int> numAlignmentsPerBatchInclusivePrefixSum(numBatches);
+    std::exclusive_scan(numReadsPerBatch.begin(), numReadsPerBatch.end(), numReadsPerBatchPrefixSum.begin(), int(0));
+    std::exclusive_scan(numHapsPerBatch.begin(), numHapsPerBatch.end(), numHapsPerBatchPrefixSum.begin(), int(0));
+    std::inclusive_scan(numAlignmentsPerBatch.begin(), numAlignmentsPerBatch.end(), numAlignmentsPerBatchInclusivePrefixSum.begin());
+
+
+    thrust::device_vector<uint8_t> d_readData = readData;
+    thrust::device_vector<uint8_t> d_hapData = hapData;
+    thrust::device_vector<int> d_readLengths = readLengths;
+    thrust::device_vector<int> d_hapLengths = hapLengths;
+    thrust::device_vector<uint8_t> d_baseQuals = baseQuals;
+    thrust::device_vector<uint8_t> d_insQuals = insQuals;
+    thrust::device_vector<uint8_t> d_delQuals = delQuals;
+    thrust::device_vector<int> d_readBeginOffsets = readBeginOffsets;
+    thrust::device_vector<int> d_hapBeginOffsets = hapBeginOffsets;
+    thrust::device_vector<int> d_numReadsPerBatch = numReadsPerBatch;
+    thrust::device_vector<int> d_numHapsPerBatch = numHapsPerBatch;
+    thrust::device_vector<int> d_numAlignmentsPerBatch = numAlignmentsPerBatch;
+    thrust::device_vector<int> d_numReadsPerBatchPrefixSum = numReadsPerBatchPrefixSum;
+    thrust::device_vector<int> d_numHapsPerBatchPrefixSum = numHapsPerBatchPrefixSum;
+    thrust::device_vector<int> d_numAlignmentsPerBatchInclusivePrefixSum = numAlignmentsPerBatchInclusivePrefixSum;
+
+    thrust::device_vector<int> d_numIndicesPerBatch = d_numReadsPerBatch;
+    thrust::device_vector<int> d_indicesPerBatch(totalNumReads);
+    thrust::transform(
+        thrust::make_counting_iterator(0), 
+        thrust::make_counting_iterator(totalNumReads),
+        d_indicesPerBatch.begin(),
+        cuda::proclaim_return_type<int>([numReadsInBatch] __device__ (int i){ return i % numReadsInBatch; })
+    );
+
+    thrust::device_vector<int> d_resultOffsetsPerBatch(totalNumAlignments);
+    thrust::sequence(d_resultOffsetsPerBatch.begin(), d_resultOffsetsPerBatch.end(), 0);
+
+    thrust::device_vector<float> d_results(totalNumAlignments,-42);
+
+    convert_DNA<<<SDIV(d_readData.size(), 512), 512>>>(d_readData.data().get(), d_readData.size());
+    convert_DNA<<<SDIV(d_hapData.size(), 512), 512>>>(d_hapData.data().get(), d_hapData.size());
+
+    cudaStream_t stream = cudaStreamLegacy;
+    std::string name = "PairHMM_align_partition_half_allowMultipleBatchesPerWarp_coalesced_smem " + std::to_string(group_size) + " " + std::to_string(numRegs);
+    constexpr int groupsPerBlock = 32 / group_size;
+    const int numBlocks = SDIV(totalNumAlignments, groupsPerBlock);
+    helpers::GpuTimer timer(stream, name);
+    PairHMM_align_partition_half_allowMultipleBatchesPerWarp_coalesced_smem<group_size,numRegs><<<numBlocks, 32, 0, stream>>>(
+        d_readData.data().get(), 
+        d_hapData.data().get(), 
+        d_baseQuals.data().get(), 
+        d_insQuals.data().get(),  
+        d_delQuals.data().get(), 
+        d_results.data().get(), 
+        d_readBeginOffsets.data().get(), 
+        d_hapBeginOffsets.data().get(), 
+        d_readLengths.data().get(), 
+        d_hapLengths.data().get(), 
+        d_numReadsPerBatch.data().get(), 
+        d_numHapsPerBatch.data().get(), 
+        d_numHapsPerBatchPrefixSum.data().get(),
+        d_numIndicesPerBatch.data().get(), 
+        d_indicesPerBatch.data().get(),
+        d_numReadsPerBatchPrefixSum.data().get(), 
+        numBatches, 
+        d_resultOffsetsPerBatch.data().get(), 
+        d_numAlignmentsPerBatch.data().get(), 
+        d_numAlignmentsPerBatchInclusivePrefixSum.data().get(), 
+        totalNumAlignments
+    );
+    CUERR;
+    timer.stop();
+    timer.printGCUPS(totalDPCells);
+    cudaDeviceSynchronize(); CUERR;
+}
+
+void runPeakBenchHalf(){
+    std::cout << "runPeakBenchHalf\n";
+
+    #define RUN(group_size, numRegs){ \
+        const int sequencelength = group_size * numRegs; \
+        runPeakBenchHalfImpl<group_size, numRegs>(sequencelength); \
+    }
+
+
+    RUN(4,4);
+    RUN(4,8);
+    RUN(4,12);
+    RUN(4,16);
+    RUN(4,20);
+    RUN(4,24);
+    RUN(4,28);
+    RUN(4,32);
+
+    RUN(8,4);
+    RUN(8,8);
+    RUN(8,12);
+    RUN(8,16);
+    RUN(8,20);
+    RUN(8,24);
+    RUN(8,28);
+    RUN(8,32);
+
+    RUN(16,4);
+    RUN(16,8);
+    RUN(16,12);
+    RUN(16,16);
+    RUN(16,20);
+    RUN(16,24);
+    RUN(16,28);
+    RUN(16,32);
+
+    RUN(32,4);
+    RUN(32,8);
+    RUN(32,12);
+    RUN(32,16);
+    RUN(32,20);
+    RUN(32,24);
+    RUN(32,28);
+    RUN(32,32);
+
+    #undef RUN
+}
+
+#endif
+
+#ifdef ENABLE_PEAK_BENCH_FLOAT
+
+template<int group_size, int numRegs>
+void runPeakBenchFloatImpl(int sequencelength){
+    const int readLength = sequencelength;
+    const int hapLength = sequencelength;
+    const int paddedReadLength = SDIV(readLength, 4) * 4;
+    const int paddedHapLength = SDIV(hapLength, 4) * 4;
+    const int numReadsInBatch = 32;
+    const int numHapsInBatch = 32;
+
+    const size_t readBytes = 256 * 1024 * 1024;
+    const size_t hapBytes = 256 * 1024 * 1024;
+
+    if(readLength > group_size * numRegs){
+        std::cout << "read length " << readLength << " > " << group_size << " * " << numRegs << ". Skipping\n";
+        return;
+    }
+
+    
+    std::vector<char> readData(readBytes);
+    std::vector<char> hapData(hapBytes);
+    const char* letters = "ACGT";
+    
+    std::mt19937 gen(42);
+    std::uniform_int_distribution<> dist(0,3);
+    for(size_t i = 0; i < readBytes; i++){
+        readData[i] = letters[dist(gen)];
+    }
+    hapData = readData;
+    
+    const int numReadsInReadData = readBytes / paddedReadLength;
+    const int numHapsInHapData = hapBytes / paddedHapLength;
+    const int maxNumBatchesInGeneratedData = std::min(numReadsInReadData / numReadsInBatch, numHapsInHapData / numHapsInBatch);
+    const int numBatches = maxNumBatchesInGeneratedData;
+    const int totalNumReads = maxNumBatchesInGeneratedData * numReadsInBatch;
+    const int totalNumHaps = maxNumBatchesInGeneratedData * numHapsInBatch;
+    const int totalNumAlignments = numReadsInBatch * numHapsInBatch * numBatches;
+    const size_t totalDPCells = size_t(readLength) * size_t(hapLength) * size_t(numReadsInBatch) * size_t(numHapsInBatch) * size_t(numBatches);
+
+    // std::cout << "numReadsInReadData " << numReadsInReadData
+    //     << ", numHapsInHapData " << numHapsInHapData
+    //     << ", numBatches " << numBatches
+    //     << ", totalNumReads " << totalNumReads
+    //     << ", totalNumHaps " << totalNumHaps
+    //     << ", totalNumAlignments " << totalNumAlignments
+    //     << "\n";
+    
+    std::vector<int> readLengths(totalNumReads, readLength);
+    std::vector<int> hapLengths(totalNumHaps, hapLength);
+    std::vector<char> baseQuals(readBytes, 'I');
+    std::vector<char> insQuals(readBytes, 'I');
+    std::vector<char> delQuals(readBytes, 'I');
+
+    std::vector<int> readBeginOffsets(totalNumReads);
+    for(int i = 0; i < totalNumReads; i++){
+        readBeginOffsets[i] = i * paddedReadLength;
+    }
+    std::vector<int> hapBeginOffsets(totalNumHaps);
+    for(int i = 0; i < totalNumHaps; i++){
+        hapBeginOffsets[i] = i * paddedHapLength;
+    }
+
+
+    std::vector<int> numReadsPerBatch(numBatches, numReadsInBatch);
+    std::vector<int> numHapsPerBatch(numBatches, numHapsInBatch);
+    std::vector<int> numAlignmentsPerBatch(numBatches, numReadsInBatch * numHapsInBatch);
+    std::vector<int> numReadsPerBatchPrefixSum(numBatches);
+    std::vector<int> numHapsPerBatchPrefixSum(numBatches);
+    std::vector<int> numAlignmentsPerBatchInclusivePrefixSum(numBatches);
+    std::exclusive_scan(numReadsPerBatch.begin(), numReadsPerBatch.end(), numReadsPerBatchPrefixSum.begin(), int(0));
+    std::exclusive_scan(numHapsPerBatch.begin(), numHapsPerBatch.end(), numHapsPerBatchPrefixSum.begin(), int(0));
+    std::inclusive_scan(numAlignmentsPerBatch.begin(), numAlignmentsPerBatch.end(), numAlignmentsPerBatchInclusivePrefixSum.begin());
+
+
+    thrust::device_vector<uint8_t> d_readData = readData;
+    thrust::device_vector<uint8_t> d_hapData = hapData;
+    thrust::device_vector<int> d_readLengths = readLengths;
+    thrust::device_vector<int> d_hapLengths = hapLengths;
+    thrust::device_vector<uint8_t> d_baseQuals = baseQuals;
+    thrust::device_vector<uint8_t> d_insQuals = insQuals;
+    thrust::device_vector<uint8_t> d_delQuals = delQuals;
+    thrust::device_vector<int> d_readBeginOffsets = readBeginOffsets;
+    thrust::device_vector<int> d_hapBeginOffsets = hapBeginOffsets;
+    thrust::device_vector<int> d_numReadsPerBatch = numReadsPerBatch;
+    thrust::device_vector<int> d_numHapsPerBatch = numHapsPerBatch;
+    thrust::device_vector<int> d_numAlignmentsPerBatch = numAlignmentsPerBatch;
+    thrust::device_vector<int> d_numReadsPerBatchPrefixSum = numReadsPerBatchPrefixSum;
+    thrust::device_vector<int> d_numHapsPerBatchPrefixSum = numHapsPerBatchPrefixSum;
+    thrust::device_vector<int> d_numAlignmentsPerBatchInclusivePrefixSum = numAlignmentsPerBatchInclusivePrefixSum;
+
+    thrust::device_vector<int> d_numIndicesPerBatch = d_numReadsPerBatch;
+    thrust::device_vector<int> d_indicesPerBatch(totalNumReads);
+    thrust::transform(
+        thrust::make_counting_iterator(0), 
+        thrust::make_counting_iterator(totalNumReads),
+        d_indicesPerBatch.begin(),
+        cuda::proclaim_return_type<int>([numReadsInBatch] __device__ (int i){ return i % numReadsInBatch; })
+    );
+
+    thrust::device_vector<int> d_resultOffsetsPerBatch(totalNumAlignments);
+    thrust::sequence(d_resultOffsetsPerBatch.begin(), d_resultOffsetsPerBatch.end(), 0);
+
+    thrust::device_vector<float> d_results(totalNumAlignments,-42);
+
+    convert_DNA<<<SDIV(d_readData.size(), 512), 512>>>(d_readData.data().get(), d_readData.size());
+    convert_DNA<<<SDIV(d_hapData.size(), 512), 512>>>(d_hapData.data().get(), d_hapData.size());
+
+    cudaStream_t stream = cudaStreamLegacy;
+    std::string name = "PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem " + std::to_string(group_size) + " " + std::to_string(numRegs);
+    constexpr int groupsPerBlock = 32 / group_size;
+    const int numBlocks = SDIV(totalNumAlignments, groupsPerBlock);
+    helpers::GpuTimer timer(stream, name);
+    PairHMM_align_partition_float_allowMultipleBatchesPerWarp_coalesced_smem<group_size,numRegs><<<numBlocks, 32, 0, stream>>>(
+        d_readData.data().get(), 
+        d_hapData.data().get(), 
+        d_baseQuals.data().get(), 
+        d_insQuals.data().get(),  
+        d_delQuals.data().get(), 
+        d_results.data().get(), 
+        d_readBeginOffsets.data().get(), 
+        d_hapBeginOffsets.data().get(), 
+        d_readLengths.data().get(), 
+        d_hapLengths.data().get(), 
+        d_numReadsPerBatch.data().get(), 
+        d_numHapsPerBatch.data().get(), 
+        d_numHapsPerBatchPrefixSum.data().get(),
+        d_numIndicesPerBatch.data().get(), 
+        d_indicesPerBatch.data().get(),
+        d_numReadsPerBatchPrefixSum.data().get(), 
+        numBatches, 
+        d_resultOffsetsPerBatch.data().get(), 
+        d_numAlignmentsPerBatch.data().get(), 
+        d_numAlignmentsPerBatchInclusivePrefixSum.data().get(), 
+        totalNumAlignments
+    );
+    CUERR;
+    timer.stop();
+    timer.printGCUPS(totalDPCells);
+    cudaDeviceSynchronize(); CUERR;
 }
 
 
+
+
+void runPeakBenchFloat(){
+    std::cout << "runPeakBenchFloat\n";
+
+    #define RUN(group_size, numRegs){ \
+        const int sequencelength = group_size * numRegs; \
+        runPeakBenchFloatImpl<group_size, numRegs>(sequencelength); \
+    }
+
+
+    RUN(4,4);
+    RUN(4,8);
+    RUN(4,12);
+    RUN(4,16);
+    RUN(4,20);
+    RUN(4,24);
+    RUN(4,28);
+    RUN(4,32);
+
+    RUN(8,4);
+    RUN(8,8);
+    RUN(8,12);
+    RUN(8,16);
+    RUN(8,20);
+    RUN(8,24);
+    RUN(8,28);
+    RUN(8,32);
+
+    RUN(16,4);
+    RUN(16,8);
+    RUN(16,12);
+    RUN(16,16);
+    RUN(16,20);
+    RUN(16,24);
+    RUN(16,28);
+    RUN(16,32);
+
+    RUN(32,4);
+    RUN(32,8);
+    RUN(32,12);
+    RUN(32,16);
+    RUN(32,20);
+    RUN(32,24);
+    RUN(32,28);
+    RUN(32,32);
+
+    #undef RUN
+}
+#endif
 
 
 int main(const int argc, char const * const argv[])
@@ -6839,6 +7226,9 @@ int main(const int argc, char const * const argv[])
         if(argstring == "--checkResults"){
             options.checkResults = true;
         }
+        if(argstring == "--peakBenchHalf"){
+            options.peakBenchHalf = true;
+        }
         if(argstring == "--peakBenchFloat"){
             options.peakBenchFloat = true;
         }
@@ -6849,13 +7239,29 @@ int main(const int argc, char const * const argv[])
     // std::cout << "options.outputfile = " << options.outputfile << "\n";
     // std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
     std::cout << "options.checkResults = " << options.checkResults << "\n";
+    std::cout << "options.peakBenchHalf = " << options.peakBenchHalf << "\n";
     std::cout << "options.peakBenchFloat = " << options.peakBenchFloat << "\n";
+
+    if(options.peakBenchHalf){
+        #ifdef ENABLE_PEAK_BENCH_HALF
+        runPeakBenchHalf();
+        #else
+        std::cout << "Need to define ENABLE_PEAK_BENCH_HALF to run runPeakBenchHalf\n";
+        #endif
+    }
+
+    if(options.peakBenchFloat){
+        #ifdef ENABLE_PEAK_BENCH_FLOAT
+        runPeakBenchFloat();
+        #else
+        std::cout << "Need to define ENABLE_PEAK_BENCH_FLOAT to run peakBenchFloat\n";
+        #endif
+    }
+    
 
     if(options.inputfile == ""){
         throw std::runtime_error("Input file not specified");
     }
-    
-
 
     helpers::CpuTimer timerParseInputFile("parse input file");
     batch fullBatch = parseInputFile(options.inputfile, ph2pr);
