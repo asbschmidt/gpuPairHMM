@@ -40,7 +40,7 @@ using std::copy;
 
 
 // #define ENABLE_PEAK_BENCH_HALF
-// #define ENABLE_PEAK_BENCH_FLOAT
+#define ENABLE_PEAK_BENCH_FLOAT
 
 
 
@@ -7256,6 +7256,9 @@ int main(const int argc, char const * const argv[])
         #else
         std::cout << "Need to define ENABLE_PEAK_BENCH_FLOAT to run peakBenchFloat\n";
         #endif
+    }
+    if(options.peakBenchFloat || options.peakBenchHalf){
+        return 0;
     }
     
 
