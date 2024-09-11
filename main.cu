@@ -7235,13 +7235,7 @@ int main(const int argc, char const * const argv[])
     }
 
     
-    std::cout << "options.inputfile = " << options.inputfile << "\n";
-    // std::cout << "options.outputfile = " << options.outputfile << "\n";
-    // std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
-    std::cout << "options.checkResults = " << options.checkResults << "\n";
-    std::cout << "options.peakBenchHalf = " << options.peakBenchHalf << "\n";
-    std::cout << "options.peakBenchFloat = " << options.peakBenchFloat << "\n";
-
+    
     if(options.peakBenchHalf){
         #ifdef ENABLE_PEAK_BENCH_HALF
         runPeakBenchHalf();
@@ -7249,7 +7243,7 @@ int main(const int argc, char const * const argv[])
         std::cout << "Need to define ENABLE_PEAK_BENCH_HALF to run runPeakBenchHalf\n";
         #endif
     }
-
+    
     if(options.peakBenchFloat){
         #ifdef ENABLE_PEAK_BENCH_FLOAT
         runPeakBenchFloat();
@@ -7261,7 +7255,13 @@ int main(const int argc, char const * const argv[])
         return 0;
     }
     
-
+    std::cout << "options.inputfile = " << options.inputfile << "\n";
+    // std::cout << "options.outputfile = " << options.outputfile << "\n";
+    // std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
+    std::cout << "options.checkResults = " << options.checkResults << "\n";
+    // std::cout << "options.peakBenchHalf = " << options.peakBenchHalf << "\n";
+    // std::cout << "options.peakBenchFloat = " << options.peakBenchFloat << "\n";
+    
     if(options.inputfile == ""){
         throw std::runtime_error("Input file not specified");
     }
@@ -7285,6 +7285,15 @@ int main(const int argc, char const * const argv[])
     std::cout << "Calculating:  " << fullBatch.getTotalNumberOfAlignments() << " alignments in " << numBatches << " batches \n";
     std::cout << "read_bytes:  " << read_bytes << ", hap_bytes  " << hap_bytes << " \n";
     std::cout << "num_reads:  " << numReads << ", num_haps  " << numHaps << " \n";
+
+    {
+        int minLength = *std::min_element(fullBatch.readlen.begin(), fullBatch.readlen.end());
+        int maxLength = *std::max_element(fullBatch.readlen.begin(), fullBatch.readlen.end());
+        size_t sumOfReadLengths = std::reduce(fullBatch.readlen.begin(), fullBatch.readlen.end(), size_t(0));
+        int avgLength = sumOfReadLengths / fullBatch.readlen.size();
+        std::cout << "minLength: " << minLength << ", maxLength: " << maxLength << ", avgLength: " << avgLength << "\n";
+    }
+
 
     #if 0
     {
@@ -7345,35 +7354,6 @@ int main(const int argc, char const * const argv[])
     if(resultsBatchAsWhole_half_coalesced_smem != resultsBatchOverlapped_half_coalesced_smem){
         std::cout << "ERROR: resultsBatchAsWhole_half_coalesced_smem != resultsBatchOverlapped_half_coalesced_smem\n";
     }
-
-    // std::vector<float> resultsCPU = processBatchCPUFaster(fullBatch, ph2pr);
-    // std::cout << "comparing half coalesced smem:\n";
-    // computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
-    // computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
-
-    // if(resultsBatchAsWhole_half != resultsBatchAsWhole_half_coalesced_smem){
-    //     std::cout << "ERROR: resultsBatchAsWhole_half != resultsBatchAsWhole_half_coalesced_smem\n";
-    //     for(size_t i = 0; i < resultsBatchAsWhole_half.size(); i++){
-    //         if(resultsBatchAsWhole_half[i] != resultsBatchAsWhole_half_coalesced_smem[i]){
-    //             std::cout << "error i = " << i << "\n";
-    //             std::cout << resultsBatchAsWhole_half[i] << " " << resultsBatchAsWhole_half_coalesced_smem[i] << "\n";
-    //             // struct AlignmentInputInfo{
-    //             //     int batchId{};
-    //             //     int hapToProcessInBatch{};
-    //             //     int readToProcessInBatch{};
-    //             //     int alignmentOffset{};
-    //             // };
-
-    //             auto info = fullBatch.getAlignmentInputInfo(i);
-    //             std::cout << "batchId " << info.batchId
-    //                 << ", hapToProcessInBatch " << info.hapToProcessInBatch
-    //                 << ", readToProcessInBatch " << info.readToProcessInBatch
-    //                 << ", alignmentOffset " << info.alignmentOffset << "\n";
-    //             break;
-    //         }
-    //     }
-    // }
-
 
 
     std::vector<float> resultsBatchAsWhole_float = processBatchAsWhole_float(fullBatch, options, countsOfDPCells);
