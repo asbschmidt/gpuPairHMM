@@ -257,6 +257,8 @@ struct Options{
     bool checkResults = false;
     bool peakBenchFloat = false;
     bool peakBenchHalf = false;
+    bool verbose = false;
+    bool filebenchmark = false;
 };
 
 template <class T>
@@ -6140,7 +6142,7 @@ std::vector<float> processBatch_overlapped_float(
 
 std::vector<float> processBatchAsWhole_float_coalesced_smem(
     const batch& fullBatch, 
-    const Options& /*options*/, 
+    const Options& options, 
     const CountsOfDPCells& countsOfDPCells
 ){
     helpers::CpuTimer totalTimer("processBatchAsWhole_float_coalesced_smem");
@@ -6217,7 +6219,10 @@ std::vector<float> processBatchAsWhole_float_coalesced_smem(
     cudaMemcpy(dev_offset_hap_batches, offset_hap_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
     cudaMemcpy(dev_read_batches, read_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
     cudaMemcpy(dev_hap_batches, hap_batches, num_batches*sizeof(int), cudaMemcpyHostToDevice); CUERR
-    transfertimer.print();
+    transfertimer.stop();
+    if(options.verbose){
+        transfertimer.print();
+    }
 
     //print_batch(fullBatch); // prints first reads/qualities and haplotype per batch.
 
@@ -6322,11 +6327,13 @@ std::vector<float> processBatchAsWhole_float_coalesced_smem(
     }
     thrust::host_vector<int> h_numAlignmentsPerPartition = d_numAlignmentsPerPartition;
 
-    std::cout << "h_numAlignmentsPerPartition: ";
-    for(int i = 0; i< numPartitions; i++){
-        std::cout << h_numAlignmentsPerPartition[i] << ", ";
+    if(options.verbose){
+        std::cout << "h_numAlignmentsPerPartition: ";
+        for(int i = 0; i< numPartitions; i++){
+            std::cout << h_numAlignmentsPerPartition[i] << ", ";
+        }
+        std::cout << "\n";
     }
-    std::cout << "\n";
 
     cudaMemset(devAlignmentScoresFloat, 0, totalNumberOfAlignments * sizeof(float)); CUERR;
     helpers::GpuTimer computeTimer("pairhmm float kernels coalesced, total");
@@ -6368,12 +6375,14 @@ std::vector<float> processBatchAsWhole_float_coalesced_smem(
 
     computeTimer.stop();
 
-    for(int p = 0; p < numPartitions; p++){
-        if(h_numAlignmentsPerPartition[p] > 0){
-            perKernelTimers[p]->printGCUPS(countsOfDPCells.dpCellsPerPartition[p]);
+    if(options.verbose){
+        for(int p = 0; p < numPartitions; p++){
+            if(h_numAlignmentsPerPartition[p] > 0){
+                perKernelTimers[p]->printGCUPS(countsOfDPCells.dpCellsPerPartition[p]);
+            }
         }
+        computeTimer.printGCUPS(countsOfDPCells.totalDPCells);
     }
-    computeTimer.printGCUPS(countsOfDPCells.totalDPCells);
 
     cudaMemcpy(alignment_scores_float.data(), devAlignmentScoresFloat, totalNumberOfAlignments*sizeof(float), cudaMemcpyDeviceToHost);  CUERR
 
@@ -6382,7 +6391,9 @@ std::vector<float> processBatchAsWhole_float_coalesced_smem(
     for (int i=0; i<numPartitions; i++) cudaStreamDestroy(streams_part[i]); CUERR;
 
     totalTimer.stop();
-    totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
+    if(options.verbose){
+        totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
+    }
 
     return alignment_scores_float;
 }
@@ -6725,7 +6736,9 @@ std::vector<float> processBatch_overlapped_float_coalesced_smem(
     }
 
     totalTimer.stop();
-    totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
+    if(options.verbose){
+        totalTimer.printGCUPS(countsOfDPCells.totalDPCells);
+    }
 
     return alignment_scores_float;
 }
@@ -7200,68 +7213,12 @@ void runPeakBenchFloat(){
 #endif
 
 
-int main(const int argc, char const * const argv[])
-{
 
-    const int MAX_PH2PR_INDEX = 128;
-
-    std::vector<float> ph2pr = generate_ph2pr(MAX_PH2PR_INDEX);
-
-    Options options;
-
-    for(int x = 1; x < argc; x++){
-        std::string argstring = argv[x];
-        if(argstring == "--inputfile"){
-            options.inputfile = argv[x+1];
-            x++;
-        }
-        if(argstring == "--outputfile"){
-            options.outputfile = argv[x+1];
-            x++;
-        }        
-        if(argstring == "--transferchunksize"){
-            options.transferchunksize = std::atoi(argv[x+1]);
-            x++;
-        }
-        if(argstring == "--checkResults"){
-            options.checkResults = true;
-        }
-        if(argstring == "--peakBenchHalf"){
-            options.peakBenchHalf = true;
-        }
-        if(argstring == "--peakBenchFloat"){
-            options.peakBenchFloat = true;
-        }
-    }
-
-    
-    
-    if(options.peakBenchHalf){
-        #ifdef ENABLE_PEAK_BENCH_HALF
-        runPeakBenchHalf();
-        #else
-        std::cout << "Need to define ENABLE_PEAK_BENCH_HALF to run runPeakBenchHalf\n";
-        #endif
-    }
-    
-    if(options.peakBenchFloat){
-        #ifdef ENABLE_PEAK_BENCH_FLOAT
-        runPeakBenchFloat();
-        #else
-        std::cout << "Need to define ENABLE_PEAK_BENCH_FLOAT to run peakBenchFloat\n";
-        #endif
-    }
-    if(options.peakBenchFloat || options.peakBenchHalf){
-        return 0;
-    }
-    
+void runFileBenchmark(const Options& options, const std::vector<float>& ph2pr){
+ 
     std::cout << "options.inputfile = " << options.inputfile << "\n";
-    // std::cout << "options.outputfile = " << options.outputfile << "\n";
-    // std::cout << "options.transferchunksize = " << options.transferchunksize << "\n";
     std::cout << "options.checkResults = " << options.checkResults << "\n";
-    // std::cout << "options.peakBenchHalf = " << options.peakBenchHalf << "\n";
-    // std::cout << "options.peakBenchFloat = " << options.peakBenchFloat << "\n";
-    
+        
     if(options.inputfile == ""){
         throw std::runtime_error("Input file not specified");
     }
@@ -7269,11 +7226,11 @@ int main(const int argc, char const * const argv[])
     helpers::CpuTimer timerParseInputFile("parse input file");
     batch fullBatch = parseInputFile(options.inputfile, ph2pr);
     timerParseInputFile.stop();
-    timerParseInputFile.print();
+    if(options.verbose){
+        timerParseInputFile.print();
+    }
 
     CountsOfDPCells countsOfDPCells = countDPCellsInBatch(fullBatch);
-
-
 
     const size_t read_bytes = fullBatch.reads.size();
     const size_t hap_bytes = fullBatch.haps.size();   
@@ -7330,14 +7287,7 @@ int main(const int argc, char const * const argv[])
     //print_batch(fullBatch); // prints first reads/qualities and haplotype per batch.
     // align_all_host(fullBatch,ph2pr);
 
-    const int deviceId = 0;
-    cudaSetDevice(deviceId); CUERR;
-    cudaMemcpyToSymbol(cPH2PR,ph2pr.data(),MAX_PH2PR_INDEX*sizeof(float));
 
-    size_t releaseThreshold = UINT64_MAX;
-    cudaMemPool_t memPool;
-    cudaDeviceGetDefaultMemPool(&memPool, deviceId);
-    cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold, &releaseThreshold); CUERR;
 
 
 
@@ -7383,29 +7333,31 @@ int main(const int argc, char const * const argv[])
     //         if(numErrors > 10) break;
     //     }
     // }
-#if 1
+    #if 1
     if(options.checkResults){
         const int numBatches = fullBatch.batch_haps.size();
         const int totalNumberOfAlignments = fullBatch.getTotalNumberOfAlignments();
         const auto& numAlignmentsPerBatchInclusivePrefixSum = fullBatch.getNumberOfAlignmentsPerBatchInclusivePrefixSum();
 
-        // std::vector<float> resultsCPU2 = processBatchCPU(fullBatch, ph2pr);
+        if(options.verbose){
+            std::cout << "Computing CPU alignments\n";
+        }
         std::vector<float> resultsCPU = processBatchCPUFaster(fullBatch, ph2pr);
         // assert(resultsCPU == resultsCPU2);
 
 
 
-        std::cout << "comparing half:\n";
-        computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_half);
-        computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_half);
+        // std::cout << "comparing half:\n";
+        // computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_half);
+        // computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_half);
 
-        std::cout << "comparing float:\n";
-        computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_float);
-        computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_float);
+        // std::cout << "comparing float:\n";
+        // computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_float);
+        // computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_float);
 
-        std::cout << "comparing half coalesced smem:\n";
-        computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
-        computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
+        // std::cout << "comparing half coalesced smem:\n";
+        // computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
+        // computeRelativeErrorStatistics(resultsCPU, resultsBatchOverlapped_half_coalesced_smem);
 
         std::cout << "comparing float coalesced smem:\n";
         computeAbsoluteErrorStatistics(resultsCPU, resultsBatchOverlapped_float_coalesced_smem);
@@ -7414,18 +7366,18 @@ int main(const int argc, char const * const argv[])
         {
             constexpr double checklimit = 0.05;
 
-            for(int i = 0, numErrors = 0; i < int(resultsBatchOverlapped_half.size()); i++){
-                const float absError = std::abs(resultsCPU[i] - resultsBatchOverlapped_half[i]);
-                if(absError > checklimit){
-                    if(numErrors == 0){
-                        std::cout << "some half error inputs:\n";
-                    }
-                    if(numErrors < 5){
-                        std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped_half[i] << ", abs error " << absError << "\n";
-                    }
-                    numErrors++;
-                }
-            }
+            // for(int i = 0, numErrors = 0; i < int(resultsBatchOverlapped_half.size()); i++){
+            //     const float absError = std::abs(resultsCPU[i] - resultsBatchOverlapped_half[i]);
+            //     if(absError > checklimit){
+            //         if(numErrors == 0){
+            //             std::cout << "some half error inputs:\n";
+            //         }
+            //         if(numErrors < 5){
+            //             std::cout << "i " << i << " : " << resultsCPU[i] << " "  <<  resultsBatchOverlapped_half[i] << ", abs error " << absError << "\n";
+            //         }
+            //         numErrors++;
+            //     }
+            // }
 
             for(int i = 0, numErrors = 0; i < int(resultsBatchOverlapped_float.size()); i++){
                 const float absError = std::abs(resultsCPU[i] - resultsBatchOverlapped_float[i]);
@@ -7473,15 +7425,152 @@ int main(const int argc, char const * const argv[])
             }
         }
     }
-#endif
-    // int res_off = 0;
-    // for (int i=0; i<1; i++) { // for (int i=0; i<num_batches; i++) {
-    //     cout << "Batch:" << i << " Offset: " << res_off << " results: ";
-    //     for(int j = 0; j < 8; j++) // for(int j = 0; j < read_batches[i]; j++)
-    //         for(int k = 0; k < fullBatch.batch_haps[i]; k++)
-    //             cout << " " << resultsBatchAsWhole_half[res_off+j*fullBatch.batch_haps[i]+k];
-    //     cout << " \n";
-    //     res_off += fullBatch.batch_reads[i] * fullBatch.batch_haps[i];
-    // }
+    #endif
 
+}
+
+
+void processFile(const Options& options, const std::vector<float>& ph2pr){
+    
+    
+    std::cout << "options.inputfile = " << options.inputfile << "\n";
+    std::cout << "options.outputfile = " << options.outputfile << "\n";        
+    std::cout << "options.verbose = " << options.verbose << "\n";
+        
+    if(options.inputfile == ""){
+        throw std::runtime_error("Input file not specified");
+    }
+    if(options.outputfile == ""){
+        throw std::runtime_error("Output file not specified");
+    }
+
+    std::ofstream outputstream(options.outputfile);
+    if(!outputstream){
+        throw std::runtime_error("could not open output file");
+    }
+
+    if(options.verbose){
+        std::cout << "Loading input file";
+    }
+    helpers::CpuTimer timerParseInputFile("parse input file");
+    batch fullBatch = parseInputFile(options.inputfile, ph2pr);
+    timerParseInputFile.stop();
+    if(options.verbose){
+        timerParseInputFile.print();
+    }
+
+    CountsOfDPCells countsOfDPCells = countDPCellsInBatch(fullBatch);
+
+    const size_t read_bytes = fullBatch.reads.size();
+    const size_t hap_bytes = fullBatch.haps.size();   
+    const int numBatches = fullBatch.batch_reads.size();
+    const int numReads = fullBatch.readlen.size();
+    const int numHaps = fullBatch.haplen.size();
+
+    std::vector<float> scores = processBatch_overlapped_float_coalesced_smem(fullBatch, options, countsOfDPCells);
+
+    //output
+    if(options.verbose){
+        std::cout << "writing output file\n";
+    }
+    size_t resultindex = 0;
+    for(int b = 0; b < numBatches; b++){
+        const int numReadsInBatch = fullBatch.batch_reads[b];
+        const int numHapsInBatch = fullBatch.batch_haps[b];
+        outputstream << numReadsInBatch << ' ' << numHapsInBatch << '\n';
+        for(int r = 0; r < numReadsInBatch; r++){
+            for(int h = 0; h < numHapsInBatch; h++){
+                if(h > 0){
+                    outputstream << ' ';
+                }
+                outputstream << scores[resultindex++];
+            }
+            outputstream << '\n';
+        }
+    }
+
+
+}
+
+
+
+int main(const int argc, char const * const argv[])
+{
+
+    const int MAX_PH2PR_INDEX = 128;
+
+    std::vector<float> ph2pr = generate_ph2pr(MAX_PH2PR_INDEX);
+    const int deviceId = 0;
+    cudaSetDevice(deviceId); CUERR;
+    cudaMemcpyToSymbol(cPH2PR,ph2pr.data(),MAX_PH2PR_INDEX*sizeof(float));
+
+    size_t releaseThreshold = UINT64_MAX;
+    cudaMemPool_t memPool;
+    cudaDeviceGetDefaultMemPool(&memPool, deviceId);
+    cudaMemPoolSetAttribute(memPool, cudaMemPoolAttrReleaseThreshold, &releaseThreshold); CUERR;
+
+    Options options;
+
+    for(int x = 1; x < argc; x++){
+        std::string argstring = argv[x];
+        if(argstring == "--inputfile"){
+            options.inputfile = argv[x+1];
+            x++;
+        }
+        if(argstring == "--outputfile"){
+            options.outputfile = argv[x+1];
+            x++;
+        }        
+        if(argstring == "--transferchunksize"){
+            options.transferchunksize = std::atoi(argv[x+1]);
+            x++;
+        }
+        if(argstring == "--checkResults"){
+            options.checkResults = true;
+        }
+        if(argstring == "--peakBenchHalf"){
+            options.peakBenchHalf = true;
+        }
+        if(argstring == "--peakBenchFloat"){
+            options.peakBenchFloat = true;
+        }
+        if(argstring == "--verbose"){
+            options.verbose = true;
+        }
+        if(argstring == "--filebenchmark"){
+            options.filebenchmark = true;
+            options.verbose = true;
+        }
+    }
+
+    
+    
+    if(options.peakBenchHalf){
+        #ifdef ENABLE_PEAK_BENCH_HALF
+        runPeakBenchHalf();
+        #else
+        std::cout << "Need to define ENABLE_PEAK_BENCH_HALF to run runPeakBenchHalf\n";
+        #endif
+    }
+    
+    if(options.peakBenchFloat){
+        #ifdef ENABLE_PEAK_BENCH_FLOAT
+        runPeakBenchFloat();
+        #else
+        std::cout << "Need to define ENABLE_PEAK_BENCH_FLOAT to run peakBenchFloat\n";
+        #endif
+    }
+    if(options.peakBenchFloat || options.peakBenchHalf){
+        return 0;
+    }
+
+    if(options.filebenchmark){
+        runFileBenchmark(options, ph2pr);
+    
+        return 0;
+    }
+
+    processFile(options, ph2pr);
+    
+    return 0;
 }

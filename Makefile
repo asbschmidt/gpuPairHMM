@@ -10,7 +10,7 @@ NVCC_FLAGS   = -arch=native -lineinfo --expt-relaxed-constexpr -rdc=true --exten
 INCLUDE_FLAGS = -INVTX/c/include
 LDFLAGS      = -Xcompiler="-pthread "  $(NVCC_FLAGS)
 COMPILER     = nvcc
-ARTIFACT     = align
+ARTIFACT     = cuPairHMM
 
 
 # make targets
