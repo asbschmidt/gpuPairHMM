@@ -1,2 +1,3 @@
 *.o
 gpuPairHMM
+benchmark_peakperformance
