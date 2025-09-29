@@ -1,13 +1,27 @@
 # settings
 DIALECT      = -std=c++17
 OPTIMIZATION = -O3 -g
-WARNINGS     = -Xcompiler="-Wall -Wextra"
-# NVCC_FLAGS   = -arch=sm_89 -lineinfo --expt-relaxed-constexpr -rdc=true
-# NVCC_FLAGS   = -arch=native -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -Xcompiler="-fopenmp"
-NVCC_FLAGS   = -arch=native -lineinfo --expt-relaxed-constexpr -rdc=true --extended-lambda -Xcompiler="-fopenmp" #-res-usage 
+WARNINGS     = -Xcompiler="-Wall -Wextra -Wno-format-security"
+
+NVCC_FLAGS   = -lineinfo --expt-relaxed-constexpr --extended-lambda -Xcompiler="-fopenmp"
+
+GPUARCH ?= native
+NVCC_GPU_ARCH = -arch=native
+
+ifeq ($(GPUARCH), native)
+	NVCC_GPU_ARCH = -arch=native
+else
+	NVCC_GPU_ARCH := $(foreach N, $(GPUARCH),-gencode=arch=compute_$(N),code=sm_$(N) )
+endif
+
+GPUARCH_NUM_COMPILE_THREADS ?= 1
+NVCC_FLAGS += $(NVCC_GPU_ARCH) --threads $(GPUARCH_NUM_COMPILE_THREADS)
+
+TUNINGARCH ?= 0
 
 
-INCLUDE_FLAGS = -INVTX/c/include
+#INCLUDE_FLAGS = -INVTX/c/include
+#NVCC_FLAGS += -DENABLE_NVTX3
 LDFLAGS      = -Xcompiler="-pthread "  $(NVCC_FLAGS)
 COMPILER     = nvcc
 ARTIFACT     = gpuPairHMM
@@ -21,6 +35,7 @@ release: $(ARTIFACT)
 clean :
 	rm -f *.o
 	rm -f $(ARTIFACT)
+	rm -f $(benchmark_peakperformance)
 
 
 # compiler call
@@ -28,17 +43,24 @@ COMPILE = $(COMPILER) $(INCLUDE_FLAGS) $(NVCC_FLAGS) $(DIALECT) $(OPTIMIZATION) 
 
 
 # link object files into executable
-$(ARTIFACT): main.o 
+$(ARTIFACT): main.o output_writer_worker.o file_parser_worker.o gpuworker.o
 	$(COMPILER) $^ -o $(ARTIFACT) $(LDFLAGS)
 
-# compile CUDA files
-main.o : main.cu cuda_helpers.cuh
+benchmark_peakperformance: benchmark_peakperformance.o
+	$(COMPILER) $^ -o benchmark_peakperformance $(LDFLAGS)
+
+
+benchmark_peakperformance.o: benchmark_peakperformance.cu cuda_helpers.cuh pairhmm_kernels.cuh utility_kernels.cuh
 	$(COMPILE)
 
-# compile pure C++ files
-#sequence_io.o : sequence_io.cpp sequence_io.h
-#	$(COMPILE)
+main.o: main.cu
+	$(COMPILE)
 
-# compile pure C++ files
-#dbdata.o : dbdata.cpp dbdata.hpp mapped_file.hpp sequence_io.cpp sequence_io.h
-#	$(COMPILE)
+output_writer_worker.o: output_writer_worker.cu
+	$(COMPILE)
+
+file_parser_worker.o: file_parser_worker.cu
+	$(COMPILE)
+
+gpuworker.o: gpuworker.cu pairhmm_kernels.cuh
+	$(COMPILE) -DTUNING_ARCH_MACRO=$(TUNINGARCH)
