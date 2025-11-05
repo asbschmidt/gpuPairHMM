@@ -6,7 +6,7 @@ gpuPairHMM: Ultra-fast GPU-based PairHMM for DNA Variant Calling
 * C++17 compiler
 
 ## Hardware requirements
-*   We have tested gpuPairHMM on the following GPU architectures: Volta (sm_70), Ampere (sm_80, sm_86), Ada (sm_89), and Hopper (sm_90). 
+*   We have tested gpuPairHMM on the following GPU architectures: Volta (sm_70), Ampere (sm_80, sm_86), Ada (sm_89), Hopper (sm_90), and Blackwell. 
 
 
 ## Download
