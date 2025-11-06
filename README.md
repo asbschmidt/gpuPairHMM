@@ -2,7 +2,7 @@
 gpuPairHMM: Ultra-fast GPU-based PairHMM for DNA Variant Calling
 
 ## Software requirements
-* Linux operating system with compatible CUDA Toolkit 12 or newer
+* Linux operating system with compatible CUDA Toolkit 12 or newer. CUDA Toolkit 13 cannot be used to compile for Volta and older GPU architectures.
 * C++17 compiler
 
 ## Hardware requirements
@@ -15,9 +15,15 @@ gpuPairHMM: Ultra-fast GPU-based PairHMM for DNA Variant Calling
 
 ## Build
 
-Build the executable `gpuPairHMM` with `make`
+Build the executable `gpuPairHMM` with `make GPUARCH=XX TUNINGARCH=YY` , for example `make GPUARCH=89 TUNINGARCH=89`.
 
-The build step compiles the GPU code for all GPU archictectures of GPUs detected in the system. The CUDA environment variable `CUDA_VISIBLE_DEVICES` can be used to control the detected GPUs. If `CUDA_VISIBLE_DEVICES` is not set, it will default to all GPUs in the system.
+GPUARCH selects the device architectures for which to compile the code. If not specified, the build step compiles the GPU code for all GPU archictectures of GPUs detected in the system. The CUDA environment variable `CUDA_VISIBLE_DEVICES` can be used to control the detected GPUs. If `CUDA_VISIBLE_DEVICES` is not set, it will default to all GPUs in the system.
+
+TUNINGARCH selects the set of kernel configurations to be used. We provide architecture-specific configs for archs 70, 80, 86, 89, 90, and 120. Specifying a different value, or not using TUNINGARCH will select a generic config.
+
+
+Our synthetic benchmark to obtain peak-performance numbers can be built with `make benchmark_peakperformance GPUARCH=XX` .
+
 
 ## Usage
 ```
@@ -26,6 +32,8 @@ The build step compiles the GPU code for all GPU archictectures of GPUs detected
     --inputfile filename : Specify input file
     --outputfile filename : Specify output file
     --verbose : More console output (optional)
+    --fileBatchsize X : Process the input file in batches of at least X alignments (optional, default X=1000000, X=0 disables file batching)
+    --transferBatchsize X : Process a file batch in chunks of at least X alignments to overlap GPU computation and PCIe transfers (optional, default X=10000000, X=0 disables transfer batching)
 ```
 
 gpuPairHMM uses GPU 0. Use the CUDA environment variable `CUDA_VISIBLE_DEVICES` to select the GPU in multi-GPU systems
@@ -52,9 +60,7 @@ Example output:
 -6.34043 -1.66333
 ```
 
-## Benchmark commands
-`./gpuPairHMM --peakBenchFloat` will measure the peak performance of different kernel configurations (i.e. read lengths)
+## Real-world benchmark data
 
-`./gpuPairHMM --inputfile filename --filebenchmark [--checkResults]` will benchmark different kernel approaches on the given input file. --checkResults will additionally recompute all alignments on the cpu and compare them to the gpu results.
 Our benchmark datasets are publicly available at: [https://zenodo.org/records/13928573](https://zenodo.org/records/13928573)
 
